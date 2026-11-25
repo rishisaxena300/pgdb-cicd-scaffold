@@ -6,15 +6,12 @@ env:
     PG_SCHEMA_DIFF_VERSION: "v1.0.9"
 
 phases:
-
   install:
     runtime-versions:
       golang: 1.27
-
     commands:
       - |
         set -euo pipefail
-
         echo "========================================"
         echo "INSTALL DATABASE CI/CD TOOLS"
         echo "========================================"
@@ -30,13 +27,10 @@ phases:
 
         echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
 
-        go install \
-          github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
+        go install github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
 
-        cp "$(go env GOPATH)/bin/pg-schema-diff" \
-          /usr/local/bin/pg-schema-diff
-
-        chmod +x /usr/local/bin/pg-schema-diff
+        cp "$(go env GOPATH)/bin/pg-schema-diff" /usr/local/bin/pg-schema-diff
+        chmod 755 /usr/local/bin/pg-schema-diff
 
         echo "========================================"
         echo "VERIFY TOOL VERSIONS"
@@ -58,21 +52,28 @@ phases:
         echo "VALIDATE INPUT"
         echo "========================================"
 
-        test -n "${RELEASE_BRANCH}"
-        test -n "${ENVIRONMENT}"
-        test -n "${RELEASE_BUCKET}"
+        if [ -z "${RELEASE_BRANCH:-}" ]; then
+          echo "ERROR: RELEASE_BRANCH is not set."
+          exit 1
+        fi
 
-        case "${ENVIRONMENT}" in
-          T1|T2)
-            echo "Target environment: ${ENVIRONMENT}"
-            ;;
-          *)
-            echo "ERROR: ENVIRONMENT must be T1 or T2."
-            exit 1
-            ;;
-        esac
+        if [ -z "${ENVIRONMENT:-}" ]; then
+          echo "ERROR: ENVIRONMENT is not set."
+          exit 1
+        fi
 
-        echo "Requested release branch: ${RELEASE_BRANCH}"
+        if [ -z "${RELEASE_BUCKET:-}" ]; then
+          echo "ERROR: RELEASE_BUCKET is not set."
+          exit 1
+        fi
+
+        if [ "${ENVIRONMENT}" != "T1" ] && [ "${ENVIRONMENT}" != "T2" ]; then
+          echo "ERROR: ENVIRONMENT must be T1 or T2."
+          exit 1
+        fi
+
+        echo "Release branch is ${RELEASE_BRANCH}"
+        echo "Target environment is ${ENVIRONMENT}"
 
         echo "========================================"
         echo "CHECK GIT SOURCE"
@@ -81,8 +82,7 @@ phases:
         git status
 
         CURRENT_COMMIT="$(git rev-parse HEAD)"
-
-        echo "Resolved commit: ${CURRENT_COMMIT}"
+        echo "Resolved commit is ${CURRENT_COMMIT}"
 
         echo "========================================"
         echo "PREPARE DB CI/CD SCRIPTS"
@@ -92,7 +92,7 @@ phases:
 
         source cicd/db/scripts/load_secret.sh plan
 
-        echo "Plan database credentials loaded for ${ENVIRONMENT}"
+        echo "Plan database secret loaded successfully."
 
   build:
     commands:
