@@ -242,8 +242,8 @@ phases:
           exit 1
         fi
 
-        if [ ! -d "cicd/db/scripts" ]; then
-          echo "ERROR - cicd/db/scripts directory is missing"
+        if [ ! -d "cicd/scripts" ]; then
+          echo "ERROR - cicd/scripts directory is missing"
           exit 1
         fi
 
@@ -252,30 +252,30 @@ phases:
           exit 1
         fi
 
-        if [ ! -f "cicd/db/scripts/create_release.sh" ]; then
+        if [ ! -f "cicd/scripts/create_release.sh" ]; then
           echo "ERROR - create_release.sh is missing"
           exit 1
         fi
 
-        if [ ! -f "cicd/db/scripts/load_secret.sh" ]; then
+        if [ ! -f "cicd/scripts/load_secret.sh" ]; then
           echo "ERROR - load_secret.sh is missing"
           exit 1
         fi
 
-        if [ ! -f "cicd/db/scripts/generate_plans.sh" ]; then
+        if [ ! -f "cicd/scripts/generate_plans.sh" ]; then
           echo "ERROR - generate_plans.sh is missing"
           exit 1
         fi
 
         echo "Required database CI/CD files found"
 
-        chmod +x cicd/db/scripts/*.sh
+        chmod +x cicd/scripts/*.sh
 
         echo "========================================"
         echo "LOAD PLAN DATABASE CREDENTIALS"
         echo "========================================"
 
-        source cicd/db/scripts/load_secret.sh plan
+        source cicd/scripts/load_secret.sh plan
 
         echo "Plan database credentials loaded successfully"
 
@@ -295,13 +295,13 @@ phases:
         echo "CREATE DESIRED SCHEMA BUNDLE"
         echo "========================================"
 
-        cicd/db/scripts/create_release.sh
+        cicd/scripts/create_release.sh
 
         echo "========================================"
         echo "GENERATE DATABASE PLANS"
         echo "========================================"
 
-        cicd/db/scripts/generate_plans.sh
+        cicd/scripts/generate_plans.sh
 
 
   post_build:
