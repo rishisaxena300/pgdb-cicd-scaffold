@@ -1,0 +1,90 @@
+version: 0.2
+ 
+env:
+  shell: bash
+ 
+  variables:
+    PG_SCHEMA_DIFF_VERSION: "v1.0.9"
+ 
+phases:
+ 
+  install:
+ 
+    runtime-versions:
+      golang: 1.27
+ 
+    commands:
+ 
+      - set -euo pipefail
+ 
+      - echo "========================================"
+      - echo "INSTALL DB CI/CD TOOLS"
+      - echo "========================================"
+ 
+      - apt-get update
+ 
+      - >
+        DEBIAN_FRONTEND=noninteractive
+        apt-get install -y
+        postgresql-client
+        jq
+        zip
+        unzip
+        ca-certificates
+ 
+      - >
+        go install
+        github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
+ 
+      - export PATH="${PATH}:$(go env GOPATH)/bin"
+ 
+      - go version
+      - pg-schema-diff --version
+      - psql --version
+      - pg_dump --version
+      - jq --version
+      - aws --version
+ 
+ 
+  pre_build:
+ 
+    commands:
+ 
+      - set -euo pipefail
+ 
+      - test -n "${RELEASE_BRANCH}"
+      - test -n "${ENVIRONMENT}"
+      - test -n "${RELEASE_BUCKET}"
+ 
+      - |
+        case "${ENVIRONMENT}" in
+          T1|T2)
+            echo "Environment validated: ${ENVIRONMENT}"
+            ;;
+          *)
+            echo "ERROR: ENVIRONMENT must be T1 or T2."
+            exit 1
+            ;;
+        esac
+ 
+      - chmod +x cicd/db/scripts/*.sh
+ 
+      - source cicd/db/scripts/load_secret.sh plan
+ 
+ 
+  build:
+ 
+    commands:
+ 
+      - set -euo pipefail
+ 
+      - cicd/db/scripts/create_release.sh
+ 
+      - cicd/db/scripts/generate_plans.sh
+ 
+ 
+artifacts:
+ 
+  files:
+ 
+    - "output/**/*"
