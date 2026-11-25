@@ -35,15 +35,18 @@ phases:
 
         echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
 
+        GOBIN=/usr/local/bin \
         go install github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
-
-        cp "$(go env GOPATH)/bin/pg-schema-diff" /usr/local/bin/pg-schema-diff
-
-        chmod 755 /usr/local/bin/pg-schema-diff
 
         echo "========================================"
         echo "VERIFY INSTALLED TOOLS"
         echo "========================================"
+
+        command -v pg-schema-diff
+        command -v psql
+        command -v pg_dump
+        command -v jq
+        command -v aws
 
         go version
         pg-schema-diff --version
@@ -108,12 +111,13 @@ phases:
         fi
 
         echo "========================================"
-        echo "VERIFY DB CI/CD FILES"
+        echo "VERIFY DATABASE CI/CD FILES"
         echo "========================================"
 
         test -d Aurora-PostgreSQL-DB
         test -d cicd/db
         test -d cicd/db/scripts
+
         test -f cicd/db/database-config.json
         test -f cicd/db/scripts/create_release.sh
         test -f cicd/db/scripts/load_secret.sh
@@ -128,6 +132,7 @@ phases:
         source cicd/db/scripts/load_secret.sh plan
 
         echo "Plan database secret loaded successfully"
+
         echo "Database host is ${PGHOST}"
         echo "Database port is ${PGPORT}"
         echo "Database user is ${PGUSER}"
@@ -144,7 +149,7 @@ phases:
         cicd/db/scripts/create_release.sh
 
         echo "========================================"
-        echo "GENERATE DATABASE MIGRATION PLAN"
+        echo "GENERATE DATABASE MIGRATION"
         echo "========================================"
 
         cicd/db/scripts/generate_plans.sh
@@ -157,7 +162,7 @@ phases:
         echo "========================================"
 
         if [ -d output ]; then
-          echo "Generated output:"
+          echo "Generated files:"
           find output -type f -print
         fi
 
