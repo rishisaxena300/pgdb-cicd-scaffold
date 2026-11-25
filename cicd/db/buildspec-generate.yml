@@ -2,71 +2,66 @@ version: 0.2
 
 env:
   shell: bash
-
   variables:
     PG_SCHEMA_DIFF_VERSION: "v1.0.9"
 
 phases:
 
   install:
-
     runtime-versions:
       golang: 1.27
 
     commands:
+      - |
+        set -euo pipefail
 
-      - set -euo pipefail
+        echo "========================================"
+        echo "INSTALL DATABASE CI/CD TOOLS"
+        echo "========================================"
 
-      - echo "========================================"
-      - echo "INSTALL DATABASE CI/CD TOOLS"
-      - echo "========================================"
+        apt-get update
 
-      - apt-get update
+        DEBIAN_FRONTEND=noninteractive apt-get install -y \
+          postgresql-client \
+          jq \
+          zip \
+          unzip \
+          ca-certificates
 
-      - >
-        DEBIAN_FRONTEND=noninteractive
-        apt-get install -y
-        postgresql-client
-        jq
-        zip
-        unzip
-        ca-certificates
+        echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
 
-      - echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
+        go install \
+          github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
 
-      - >
-        go install
-        github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
+        cp "$(go env GOPATH)/bin/pg-schema-diff" \
+          /usr/local/bin/pg-schema-diff
 
-      - export PATH="${PATH}:$(go env GOPATH)/bin"
+        chmod +x /usr/local/bin/pg-schema-diff
 
-      - echo "========================================"
-      - echo "VERIFY TOOL VERSIONS"
-      - echo "========================================"
+        echo "========================================"
+        echo "VERIFY TOOL VERSIONS"
+        echo "========================================"
 
-      - go version
-      - pg-schema-diff --version
-      - psql --version
-      - pg_dump --version
-      - jq --version
-      - aws --version
-
+        go version
+        pg-schema-diff --version
+        psql --version
+        pg_dump --version
+        jq --version
+        aws --version
 
   pre_build:
-
     commands:
-
-      - set -euo pipefail
-
-      - echo "========================================"
-      - echo "VALIDATE INPUT"
-      - echo "========================================"
-
-      - test -n "${RELEASE_BRANCH}"
-      - test -n "${ENVIRONMENT}"
-      - test -n "${RELEASE_BUCKET}"
-
       - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VALIDATE INPUT"
+        echo "========================================"
+
+        test -n "${RELEASE_BRANCH}"
+        test -n "${ENVIRONMENT}"
+        test -n "${RELEASE_BUCKET}"
+
         case "${ENVIRONMENT}" in
           T1|T2)
             echo "Target environment: ${ENVIRONMENT}"
@@ -77,52 +72,52 @@ phases:
             ;;
         esac
 
-      - echo "Requested release branch: ${RELEASE_BRANCH}"
+        echo "Requested release branch: ${RELEASE_BRANCH}"
 
-      - echo "========================================"
-      - echo "CHECK GIT SOURCE"
-      - echo "========================================"
+        echo "========================================"
+        echo "CHECK GIT SOURCE"
+        echo "========================================"
 
-      - git status
+        git status
 
-      - CURRENT_COMMIT="$(git rev-parse HEAD)"
+        CURRENT_COMMIT="$(git rev-parse HEAD)"
 
-      - echo "Resolved commit: ${CURRENT_COMMIT}"
+        echo "Resolved commit: ${CURRENT_COMMIT}"
 
-      - chmod +x cicd/db/scripts/*.sh
+        echo "========================================"
+        echo "PREPARE DB CI/CD SCRIPTS"
+        echo "========================================"
 
-      - source cicd/db/scripts/load_secret.sh plan
+        chmod +x cicd/db/scripts/*.sh
 
+        source cicd/db/scripts/load_secret.sh plan
+
+        echo "Plan database credentials loaded for ${ENVIRONMENT}"
 
   build:
-
     commands:
+      - |
+        set -euo pipefail
 
-      - set -euo pipefail
+        echo "========================================"
+        echo "CREATE DESIRED SCHEMA BUNDLE"
+        echo "========================================"
 
-      - echo "========================================"
-      - echo "CREATE DESIRED SCHEMA BUNDLE"
-      - echo "========================================"
+        cicd/db/scripts/create_release.sh
 
-      - cicd/db/scripts/create_release.sh
+        echo "========================================"
+        echo "GENERATE DATABASE MIGRATION"
+        echo "========================================"
 
-      - echo "========================================"
-      - echo "GENERATE MIGRATION"
-      - echo "========================================"
-
-      - cicd/db/scripts/generate_plans.sh
-
+        cicd/db/scripts/generate_plans.sh
 
   post_build:
-
     commands:
-
-      - echo "========================================"
-      - echo "DATABASE PLAN GENERATION COMPLETED"
-      - echo "========================================"
-
+      - |
+        echo "========================================"
+        echo "DATABASE PLAN GENERATION COMPLETED"
+        echo "========================================"
 
 artifacts:
-
   files:
     - "output/**/*"
