@@ -1,28 +1,28 @@
 version: 0.2
- 
+
 env:
   shell: bash
- 
+
   variables:
     PG_SCHEMA_DIFF_VERSION: "v1.0.9"
- 
+
 phases:
- 
+
   install:
- 
+
     runtime-versions:
       golang: 1.27
- 
+
     commands:
- 
+
       - set -euo pipefail
- 
+
       - echo "========================================"
-      - echo "INSTALL DB CI/CD TOOLS"
+      - echo "INSTALL DATABASE CI/CD TOOLS"
       - echo "========================================"
- 
+
       - apt-get update
- 
+
       - >
         DEBIAN_FRONTEND=noninteractive
         apt-get install -y
@@ -31,60 +31,98 @@ phases:
         zip
         unzip
         ca-certificates
- 
+
+      - echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
+
       - >
         go install
         github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
- 
+
       - export PATH="${PATH}:$(go env GOPATH)/bin"
- 
+
+      - echo "========================================"
+      - echo "VERIFY TOOL VERSIONS"
+      - echo "========================================"
+
       - go version
       - pg-schema-diff --version
       - psql --version
       - pg_dump --version
       - jq --version
       - aws --version
- 
- 
+
+
   pre_build:
- 
+
     commands:
- 
+
       - set -euo pipefail
- 
+
+      - echo "========================================"
+      - echo "VALIDATE INPUT"
+      - echo "========================================"
+
       - test -n "${RELEASE_BRANCH}"
       - test -n "${ENVIRONMENT}"
       - test -n "${RELEASE_BUCKET}"
- 
+
       - |
         case "${ENVIRONMENT}" in
           T1|T2)
-            echo "Environment validated: ${ENVIRONMENT}"
+            echo "Target environment: ${ENVIRONMENT}"
             ;;
           *)
             echo "ERROR: ENVIRONMENT must be T1 or T2."
             exit 1
             ;;
         esac
- 
+
+      - echo "Requested release branch: ${RELEASE_BRANCH}"
+
+      - echo "========================================"
+      - echo "CHECK GIT SOURCE"
+      - echo "========================================"
+
+      - git status
+
+      - CURRENT_COMMIT="$(git rev-parse HEAD)"
+
+      - echo "Resolved commit: ${CURRENT_COMMIT}"
+
       - chmod +x cicd/db/scripts/*.sh
- 
+
       - source cicd/db/scripts/load_secret.sh plan
- 
- 
+
+
   build:
- 
+
     commands:
- 
+
       - set -euo pipefail
- 
+
+      - echo "========================================"
+      - echo "CREATE DESIRED SCHEMA BUNDLE"
+      - echo "========================================"
+
       - cicd/db/scripts/create_release.sh
- 
+
+      - echo "========================================"
+      - echo "GENERATE MIGRATION"
+      - echo "========================================"
+
       - cicd/db/scripts/generate_plans.sh
- 
- 
+
+
+  post_build:
+
+    commands:
+
+      - echo "========================================"
+      - echo "DATABASE PLAN GENERATION COMPLETED"
+      - echo "========================================"
+
+
 artifacts:
- 
+
   files:
- 
     - "output/**/*"
