@@ -9,12 +9,14 @@ phases:
   install:
     runtime-versions:
       golang: 1.27
+
     commands:
       - |
         set -euo pipefail
 
         echo "========================================"
-        echo "DB BUILDSPEC VERSION 3"
+        echo "BACH DB CI/CD - GENERATE"
+        echo "========================================"
         echo "INSTALL DATABASE CI/CD TOOLS"
         echo "========================================"
 
@@ -27,15 +29,20 @@ phases:
           unzip \
           ca-certificates
 
+        echo "========================================"
+        echo "INSTALL PG-SCHEMA-DIFF"
+        echo "========================================"
+
         echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
 
         go install github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
 
         cp "$(go env GOPATH)/bin/pg-schema-diff" /usr/local/bin/pg-schema-diff
+
         chmod 755 /usr/local/bin/pg-schema-diff
 
         echo "========================================"
-        echo "VERIFY TOOL VERSIONS"
+        echo "VERIFY INSTALLED TOOLS"
         echo "========================================"
 
         go version
@@ -51,21 +58,21 @@ phases:
         set -euo pipefail
 
         echo "========================================"
-        echo "VALIDATE INPUT"
+        echo "VALIDATE BUILD INPUTS"
         echo "========================================"
 
         if [ -z "${RELEASE_BRANCH:-}" ]; then
-          echo "ERROR - RELEASE_BRANCH is not set"
+          echo "ERROR - RELEASE_BRANCH is required"
           exit 1
         fi
 
         if [ -z "${ENVIRONMENT:-}" ]; then
-          echo "ERROR - ENVIRONMENT is not set"
+          echo "ERROR - ENVIRONMENT is required"
           exit 1
         fi
 
         if [ -z "${RELEASE_BUCKET:-}" ]; then
-          echo "ERROR - RELEASE_BUCKET is not set"
+          echo "ERROR - RELEASE_BUCKET is required"
           exit 1
         fi
 
@@ -74,27 +81,56 @@ phases:
           exit 1
         fi
 
-        echo "Release branch is ${RELEASE_BRANCH}"
+        echo "Requested release branch is ${RELEASE_BRANCH}"
         echo "Target environment is ${ENVIRONMENT}"
+        echo "Release bucket is ${RELEASE_BUCKET}"
 
         echo "========================================"
-        echo "CHECK GIT SOURCE"
+        echo "CHECKOUT REQUESTED RELEASE BRANCH"
         echo "========================================"
 
-        git status
+        git remote -v
 
+        git fetch origin "${RELEASE_BRANCH}"
+
+        git checkout -B "${RELEASE_BRANCH}" "origin/${RELEASE_BRANCH}"
+
+        CURRENT_BRANCH="$(git branch --show-current)"
         CURRENT_COMMIT="$(git rev-parse HEAD)"
+
+        echo "Requested branch is ${RELEASE_BRANCH}"
+        echo "Checked out branch is ${CURRENT_BRANCH}"
         echo "Resolved commit is ${CURRENT_COMMIT}"
+
+        if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - checked out branch does not match RELEASE_BRANCH"
+          exit 1
+        fi
+
+        echo "========================================"
+        echo "VERIFY DB CI/CD FILES"
+        echo "========================================"
+
+        test -d Aurora-PostgreSQL-DB
+        test -d cicd/db
+        test -d cicd/db/scripts
+        test -f cicd/db/database-config.json
+        test -f cicd/db/scripts/create_release.sh
+        test -f cicd/db/scripts/load_secret.sh
+        test -f cicd/db/scripts/generate_plans.sh
+
+        chmod +x cicd/db/scripts/*.sh
 
         echo "========================================"
         echo "LOAD PLAN DATABASE SECRET"
         echo "========================================"
 
-        chmod +x cicd/db/scripts/*.sh
-
         source cicd/db/scripts/load_secret.sh plan
 
         echo "Plan database secret loaded successfully"
+        echo "Database host is ${PGHOST}"
+        echo "Database port is ${PGPORT}"
+        echo "Database user is ${PGUSER}"
 
   build:
     commands:
@@ -108,7 +144,7 @@ phases:
         cicd/db/scripts/create_release.sh
 
         echo "========================================"
-        echo "GENERATE DATABASE MIGRATION"
+        echo "GENERATE DATABASE MIGRATION PLAN"
         echo "========================================"
 
         cicd/db/scripts/generate_plans.sh
@@ -120,6 +156,12 @@ phases:
         echo "DATABASE PLAN GENERATION COMPLETED"
         echo "========================================"
 
+        if [ -d output ]; then
+          echo "Generated output:"
+          find output -type f -print
+        fi
+
 artifacts:
   files:
     - "output/**/*"
+  discard-paths: no
