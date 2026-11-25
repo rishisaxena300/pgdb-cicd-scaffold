@@ -79,7 +79,6 @@ phases:
           then
 
             POSTGRES_CLIENT_INSTALLED="true"
-
             break
 
           fi
@@ -148,21 +147,51 @@ phases:
           exit 1
         fi
 
+        echo "========================================"
+        echo "NORMALIZE INPUT"
+        echo "========================================"
+
+        RELEASE_BRANCH="$(
+          printf '%s' "${RELEASE_BRANCH}" |
+          xargs
+        )"
+
+        ENVIRONMENT="$(
+          printf '%s' "${ENVIRONMENT}" |
+          xargs |
+          tr '[:lower:]' '[:upper:]'
+        )"
+
+        RELEASE_BUCKET="$(
+          printf '%s' "${RELEASE_BUCKET}" |
+          xargs
+        )"
+
+        export RELEASE_BRANCH
+        export ENVIRONMENT
+        export RELEASE_BUCKET
+
+        echo "Release branch is '${RELEASE_BRANCH}'"
+        echo "Target environment is '${ENVIRONMENT}'"
+        echo "Release bucket is '${RELEASE_BUCKET}'"
+
+        echo "========================================"
+        echo "VALIDATE NORMALIZED ENVIRONMENT"
+        echo "========================================"
+
         case "${ENVIRONMENT}" in
 
           T1|T2)
+            echo "Environment validation passed"
             ;;
 
           *)
             echo "ERROR - ENVIRONMENT must be T1 or T2"
+            echo "Received value is '${ENVIRONMENT}'"
             exit 1
             ;;
 
         esac
-
-        echo "Release branch is ${RELEASE_BRANCH}"
-        echo "Target environment is ${ENVIRONMENT}"
-        echo "Release bucket is ${RELEASE_BUCKET}"
 
         echo "========================================"
         echo "CHECKOUT RELEASE BRANCH"
@@ -170,7 +199,11 @@ phases:
 
         git remote -v
 
+        echo "Fetching branch ${RELEASE_BRANCH}"
+
         git fetch origin "${RELEASE_BRANCH}"
+
+        echo "Checking out branch ${RELEASE_BRANCH}"
 
         git checkout -B \
           "${RELEASE_BRANCH}" \
@@ -191,7 +224,6 @@ phases:
         if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
 
           echo "ERROR - checked out branch does not match RELEASE_BRANCH"
-
           exit 1
 
         fi
@@ -202,6 +234,16 @@ phases:
 
         if [ ! -d "Aurora-PostgreSQL-DB" ]; then
           echo "ERROR - Aurora-PostgreSQL-DB directory is missing"
+          exit 1
+        fi
+
+        if [ ! -d "cicd/db" ]; then
+          echo "ERROR - cicd/db directory is missing"
+          exit 1
+        fi
+
+        if [ ! -d "cicd/db/scripts" ]; then
+          echo "ERROR - cicd/db/scripts directory is missing"
           exit 1
         fi
 
@@ -224,6 +266,8 @@ phases:
           echo "ERROR - generate_plans.sh is missing"
           exit 1
         fi
+
+        echo "Required database CI/CD files found"
 
         chmod +x cicd/db/scripts/*.sh
 
@@ -278,6 +322,10 @@ phases:
           find output \
             -type f \
             -print
+
+        else
+
+          echo "No output directory found"
 
         fi
 
