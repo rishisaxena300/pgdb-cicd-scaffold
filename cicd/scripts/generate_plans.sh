@@ -2,8 +2,8 @@
  
 set -euo pipefail
  
-DATABASE="AADR"
-SCHEMA="$(jq -er '.AADR[0]' cicd/db/database-config.json)"
+DATABASE="AWDIM"
+SCHEMA="$(jq -er '.AWDIM[0]' cicd/db/database-config.json)"
  
 BASE_DIR="output/${ENVIRONMENT}"
  
