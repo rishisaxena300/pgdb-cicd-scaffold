@@ -3,9 +3,6 @@ version: 0.2
 env:
   shell: bash
 
-  variables:
-    PG_SCHEMA_DIFF_VERSION: "v1.0.9"
-
 phases:
 
   install:
@@ -15,114 +12,473 @@ phases:
 
     commands:
 
-      - set -euo pipefail
+      - |
+        set -euo pipefail
 
-      - echo "========================================"
-      - echo "INSTALL DATABASE CI/CD TOOLS"
-      - echo "========================================"
+        echo "========================================"
+        echo "BACH DB CI/CD - GENERATE"
+        echo "========================================"
 
-      - apt-get update
+        echo "========================================"
+        echo "VERIFY BASE CODEBUILD TOOLS"
+        echo "========================================"
 
-      - >
-        DEBIAN_FRONTEND=noninteractive
-        apt-get install -y
-        postgresql-client
-        jq
-        zip
-        unzip
-        ca-certificates
+        command -v git
+        command -v jq
+        command -v zip
+        command -v unzip
+        command -v aws
+        command -v go
 
-      - echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
+        git --version
+        jq --version
+        aws --version
+        go version
 
-      - >
-        go install
-        github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
+        echo "========================================"
+        echo "READ TOOL VERSION CONFIGURATION"
+        echo "========================================"
 
-      - export PATH="${PATH}:$(go env GOPATH)/bin"
+        TOOL_CONFIG="cicd/db/tool-versions.json"
 
-      - echo "========================================"
-      - echo "VERIFY TOOL VERSIONS"
-      - echo "========================================"
+        if [ ! -f "${TOOL_CONFIG}" ]; then
+          echo "ERROR - ${TOOL_CONFIG} does not exist"
+          exit 1
+        fi
 
-      - go version
-      - pg-schema-diff --version
-      - psql --version
-      - pg_dump --version
-      - jq --version
-      - aws --version
+        POSTGRES_CLIENT_MAJOR="$(
+          jq -er '.postgres_client_major' "${TOOL_CONFIG}"
+        )"
+
+        PG_SCHEMA_DIFF_VERSION="$(
+          jq -er '.pg_schema_diff_version' "${TOOL_CONFIG}"
+        )"
+
+        POSTGRES_CLIENT_MAJOR="$(
+          printf '%s' "${POSTGRES_CLIENT_MAJOR}" |
+          xargs
+        )"
+
+        PG_SCHEMA_DIFF_VERSION="$(
+          printf '%s' "${PG_SCHEMA_DIFF_VERSION}" |
+          xargs
+        )"
+
+        if ! [[ "${POSTGRES_CLIENT_MAJOR}" =~ ^[0-9]+$ ]]; then
+          echo "ERROR - postgres_client_major must be numeric"
+          echo "Received value is '${POSTGRES_CLIENT_MAJOR}'"
+          exit 1
+        fi
+
+        if ! [[ "${PG_SCHEMA_DIFF_VERSION}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+          echo "ERROR - pg_schema_diff_version must use vX.Y.Z format"
+          echo "Received value is '${PG_SCHEMA_DIFF_VERSION}'"
+          exit 1
+        fi
+
+        export POSTGRES_CLIENT_MAJOR
+        export PG_SCHEMA_DIFF_VERSION
+
+        echo "PostgreSQL client major is ${POSTGRES_CLIENT_MAJOR}"
+        echo "pg-schema-diff version is ${PG_SCHEMA_DIFF_VERSION}"
+
+        echo "========================================"
+        echo "INSTALL POSTGRESQL CLIENT PREREQUISITES"
+        echo "========================================"
+
+        UBUNTU_SOURCE_FILE="/etc/apt/sources.list.d/ubuntu.sources"
+
+        if [ ! -f "${UBUNTU_SOURCE_FILE}" ]; then
+          echo "ERROR - Ubuntu APT source file is missing"
+          echo "Expected ${UBUNTU_SOURCE_FILE}"
+          exit 1
+        fi
+
+        apt-get \
+          -o Dir::Etc::sourcelist="${UBUNTU_SOURCE_FILE}" \
+          -o Dir::Etc::sourceparts="-" \
+          update
+
+        DEBIAN_FRONTEND=noninteractive \
+        apt-get \
+          -o Dir::Etc::sourcelist="${UBUNTU_SOURCE_FILE}" \
+          -o Dir::Etc::sourceparts="-" \
+          install -y \
+          curl \
+          ca-certificates \
+          gpg
+
+        echo "========================================"
+        echo "CONFIGURE POSTGRESQL PGDG REPOSITORY"
+        echo "========================================"
+
+        install -d -m 0755 \
+          /usr/share/postgresql-common/pgdg
+
+        curl \
+          --fail \
+          --silent \
+          --show-error \
+          --location \
+          --output /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc \
+          https://www.postgresql.org/media/keys/ACCC4CF8.asc
+
+        cat > /etc/apt/sources.list.d/pgdg.sources <<'EOF'
+        Types: deb
+        URIs: https://apt.postgresql.org/pub/repos/apt
+        Suites: noble-pgdg
+        Components: main
+        Signed-By: /usr/share/postgresql-common/pgdg/apt.postgresql.org.asc
+        EOF
+
+        echo "========================================"
+        echo "INSTALL POSTGRESQL CLIENT"
+        echo "========================================"
+
+        apt-get \
+          -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/pgdg.sources" \
+          -o Dir::Etc::sourceparts="-" \
+          update
+
+        DEBIAN_FRONTEND=noninteractive \
+        apt-get \
+          -o Dir::Etc::sourcelist="/etc/apt/sources.list.d/pgdg.sources" \
+          -o Dir::Etc::sourceparts="-" \
+          install -y \
+          "postgresql-client-${POSTGRES_CLIENT_MAJOR}"
+
+        POSTGRES_BIN_DIR="/usr/lib/postgresql/${POSTGRES_CLIENT_MAJOR}/bin"
+
+        if [ ! -x "${POSTGRES_BIN_DIR}/psql" ]; then
+          echo "ERROR - psql was not installed at the expected location"
+          echo "Expected ${POSTGRES_BIN_DIR}/psql"
+          exit 1
+        fi
+
+        if [ ! -x "${POSTGRES_BIN_DIR}/pg_dump" ]; then
+          echo "ERROR - pg_dump was not installed at the expected location"
+          echo "Expected ${POSTGRES_BIN_DIR}/pg_dump"
+          exit 1
+        fi
+
+        ln -sfn \
+          "${POSTGRES_BIN_DIR}/psql" \
+          /usr/local/bin/psql
+
+        ln -sfn \
+          "${POSTGRES_BIN_DIR}/pg_dump" \
+          /usr/local/bin/pg_dump
+
+        ln -sfn \
+          "${POSTGRES_BIN_DIR}/pg_restore" \
+          /usr/local/bin/pg_restore
+
+        echo "========================================"
+        echo "VERIFY POSTGRESQL CLIENT"
+        echo "========================================"
+
+        command -v psql
+        command -v pg_dump
+        command -v pg_restore
+
+        psql --version
+        pg_dump --version
+        pg_restore --version
+
+        INSTALLED_POSTGRES_MAJOR="$(
+          pg_dump --version |
+          awk '{print $3}' |
+          cut -d. -f1
+        )"
+
+        if [ "${INSTALLED_POSTGRES_MAJOR}" != "${POSTGRES_CLIENT_MAJOR}" ]; then
+          echo "ERROR - installed PostgreSQL client major does not match configuration"
+          echo "Configured major is ${POSTGRES_CLIENT_MAJOR}"
+          echo "Installed major is ${INSTALLED_POSTGRES_MAJOR}"
+          exit 1
+        fi
+
+        echo "========================================"
+        echo "INSTALL PG-SCHEMA-DIFF"
+        echo "========================================"
+
+        echo "Installing pg-schema-diff ${PG_SCHEMA_DIFF_VERSION}"
+
+        GOBIN=/usr/local/bin \
+        go install \
+          github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
+
+        echo "========================================"
+        echo "VERIFY PG-SCHEMA-DIFF"
+        echo "========================================"
+
+        command -v pg-schema-diff
+
+        INSTALLED_SCHEMA_DIFF_VERSION="$(
+          pg-schema-diff version |
+          sed -n 's/^version=//p' |
+          xargs
+        )"
+
+        echo "Installed pg-schema-diff version is ${INSTALLED_SCHEMA_DIFF_VERSION}"
+
+        if [ "${INSTALLED_SCHEMA_DIFF_VERSION}" != "${PG_SCHEMA_DIFF_VERSION}" ]; then
+          echo "ERROR - installed pg-schema-diff version does not match configuration"
+          echo "Configured version is ${PG_SCHEMA_DIFF_VERSION}"
+          echo "Installed version is ${INSTALLED_SCHEMA_DIFF_VERSION}"
+          exit 1
+        fi
+
+        echo "Database CI/CD tooling is ready"
 
 
   pre_build:
 
     commands:
 
-      - set -euo pipefail
-
-      - echo "========================================"
-      - echo "VALIDATE INPUT"
-      - echo "========================================"
-
-      - test -n "${RELEASE_BRANCH}"
-      - test -n "${ENVIRONMENT}"
-      - test -n "${RELEASE_BUCKET}"
-
       - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VALIDATE PIPELINE INPUT"
+        echo "========================================"
+
+        if [ -z "${RELEASE_BRANCH:-}" ]; then
+          echo "ERROR - RELEASE_BRANCH is required"
+          exit 1
+        fi
+
+        if [ -z "${ENVIRONMENT:-}" ]; then
+          echo "ERROR - ENVIRONMENT is required"
+          exit 1
+        fi
+
+        if [ -z "${RELEASE_BUCKET:-}" ]; then
+          echo "ERROR - RELEASE_BUCKET is required"
+          exit 1
+        fi
+
+        echo "========================================"
+        echo "NORMALIZE INPUT"
+        echo "========================================"
+
+        RELEASE_BRANCH="$(
+          printf '%s' "${RELEASE_BRANCH}" |
+          xargs
+        )"
+
+        ENVIRONMENT="$(
+          printf '%s' "${ENVIRONMENT}" |
+          xargs |
+          tr '[:lower:]' '[:upper:]'
+        )"
+
+        RELEASE_BUCKET="$(
+          printf '%s' "${RELEASE_BUCKET}" |
+          xargs
+        )"
+
+        export RELEASE_BRANCH
+        export ENVIRONMENT
+        export RELEASE_BUCKET
+
+        echo "Release branch is '${RELEASE_BRANCH}'"
+        echo "Target environment is '${ENVIRONMENT}'"
+        echo "Release bucket is '${RELEASE_BUCKET}'"
+
+        echo "========================================"
+        echo "VALIDATE NORMALIZED ENVIRONMENT"
+        echo "========================================"
+
         case "${ENVIRONMENT}" in
+
           T1|T2)
-            echo "Target environment: ${ENVIRONMENT}"
+            echo "Environment validation passed"
             ;;
+
           *)
-            echo "ERROR: ENVIRONMENT must be T1 or T2."
+            echo "ERROR - ENVIRONMENT must be T1 or T2"
+            echo "Received value is '${ENVIRONMENT}'"
             exit 1
             ;;
+
         esac
 
-      - echo "Requested release branch: ${RELEASE_BRANCH}"
+        echo "========================================"
+        echo "CHECKOUT RELEASE BRANCH"
+        echo "========================================"
 
-      - echo "========================================"
-      - echo "CHECK GIT SOURCE"
-      - echo "========================================"
+        git remote -v
 
-      - git status
+        echo "Fetching branch ${RELEASE_BRANCH}"
 
-      - CURRENT_COMMIT="$(git rev-parse HEAD)"
+        git fetch \
+          origin \
+          "${RELEASE_BRANCH}"
 
-      - echo "Resolved commit: ${CURRENT_COMMIT}"
+        echo "Checking out branch ${RELEASE_BRANCH}"
 
-      - chmod +x cicd/db/scripts/*.sh
+        git checkout \
+          -B "${RELEASE_BRANCH}" \
+          "origin/${RELEASE_BRANCH}"
 
-      - source cicd/db/scripts/load_secret.sh plan
+        CURRENT_BRANCH="$(
+          git branch --show-current
+        )"
+
+        CURRENT_COMMIT="$(
+          git rev-parse HEAD
+        )"
+
+        echo "Requested branch is ${RELEASE_BRANCH}"
+        echo "Checked out branch is ${CURRENT_BRANCH}"
+        echo "Resolved commit is ${CURRENT_COMMIT}"
+
+        if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - checked out branch does not match RELEASE_BRANCH"
+          exit 1
+        fi
+
+        echo "========================================"
+        echo "VERIFY DATABASE CI/CD FILES"
+        echo "========================================"
+
+        if [ ! -d "Aurora-PostgreSQL-DB" ]; then
+          echo "ERROR - Aurora-PostgreSQL-DB directory is missing"
+          exit 1
+        fi
+
+        if [ ! -d "cicd/db" ]; then
+          echo "ERROR - cicd/db directory is missing"
+          exit 1
+        fi
+
+        if [ ! -d "cicd/scripts" ]; then
+          echo "ERROR - cicd/scripts directory is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/database-config.json" ]; then
+          echo "ERROR - cicd/db/database-config.json is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/tool-versions.json" ]; then
+          echo "ERROR - cicd/db/tool-versions.json is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/scripts/create_release.sh" ]; then
+          echo "ERROR - cicd/scripts/create_release.sh is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/scripts/load_secret.sh" ]; then
+          echo "ERROR - cicd/scripts/load_secret.sh is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/scripts/generate_plans.sh" ]; then
+          echo "ERROR - cicd/scripts/generate_plans.sh is missing"
+          exit 1
+        fi
+
+        echo "Required database CI/CD files found"
+
+        echo "========================================"
+        echo "VERIFY TOOL CONFIGURATION AFTER CHECKOUT"
+        echo "========================================"
+
+        CHECKED_OUT_POSTGRES_MAJOR="$(
+          jq -er '.postgres_client_major' \
+            cicd/db/tool-versions.json |
+          xargs
+        )"
+
+        CHECKED_OUT_SCHEMA_DIFF_VERSION="$(
+          jq -er '.pg_schema_diff_version' \
+            cicd/db/tool-versions.json |
+          xargs
+        )"
+
+        if [ "${CHECKED_OUT_POSTGRES_MAJOR}" != "${POSTGRES_CLIENT_MAJOR}" ]; then
+          echo "ERROR - release branch tool configuration differs from installed PostgreSQL client"
+          echo "Installed major is ${POSTGRES_CLIENT_MAJOR}"
+          echo "Release branch requires ${CHECKED_OUT_POSTGRES_MAJOR}"
+          exit 1
+        fi
+
+        if [ "${CHECKED_OUT_SCHEMA_DIFF_VERSION}" != "${PG_SCHEMA_DIFF_VERSION}" ]; then
+          echo "ERROR - release branch tool configuration differs from installed pg-schema-diff"
+          echo "Installed version is ${PG_SCHEMA_DIFF_VERSION}"
+          echo "Release branch requires ${CHECKED_OUT_SCHEMA_DIFF_VERSION}"
+          exit 1
+        fi
+
+        chmod +x cicd/scripts/*.sh
+
+        echo "========================================"
+        echo "LOAD PLAN DATABASE CREDENTIALS"
+        echo "========================================"
+
+        source cicd/scripts/load_secret.sh plan
+
+        echo "Plan database credentials loaded successfully"
+
+        echo "Database host is ${PGHOST}"
+        echo "Database port is ${PGPORT}"
+        echo "Database user is ${PGUSER}"
 
 
   build:
 
     commands:
 
-      - set -euo pipefail
+      - |
+        set -euo pipefail
 
-      - echo "========================================"
-      - echo "CREATE DESIRED SCHEMA BUNDLE"
-      - echo "========================================"
+        echo "========================================"
+        echo "CREATE DESIRED SCHEMA BUNDLE"
+        echo "========================================"
 
-      - cicd/db/scripts/create_release.sh
+        cicd/scripts/create_release.sh
 
-      - echo "========================================"
-      - echo "GENERATE MIGRATION"
-      - echo "========================================"
+        echo "========================================"
+        echo "GENERATE DATABASE PLANS"
+        echo "========================================"
 
-      - cicd/db/scripts/generate_plans.sh
+        cicd/scripts/generate_plans.sh
 
 
   post_build:
 
     commands:
 
-      - echo "========================================"
-      - echo "DATABASE PLAN GENERATION COMPLETED"
-      - echo "========================================"
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "DATABASE PLAN GENERATION COMPLETED"
+        echo "========================================"
+
+        if [ -d "output" ]; then
+
+          echo "Generated files:"
+
+          find output \
+            -type f \
+            -print
+
+        else
+
+          echo "No output directory found"
+
+        fi
 
 
 artifacts:
 
   files:
     - "output/**/*"
+
+  discard-paths: no
