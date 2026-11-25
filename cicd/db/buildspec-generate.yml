@@ -58,11 +58,13 @@ phases:
         echo "Using Ubuntu APT source files:"
         printf '%s\n' "${UBUNTU_SOURCE_FILES}"
 
-        APT_SOURCE_ARGS=""
+        POSTGRES_CLIENT_INSTALLED="false"
 
         while IFS= read -r SOURCE_FILE
         do
-          APT_SOURCE_ARGS="${APT_SOURCE_ARGS} -o Dir::Etc::sourcelist=${SOURCE_FILE} -o Dir::Etc::sourceparts=-"
+
+          echo "Trying Ubuntu source:"
+          echo "${SOURCE_FILE}"
 
           apt-get \
             -o Dir::Etc::sourcelist="${SOURCE_FILE}" \
@@ -75,9 +77,19 @@ phases:
                -o Dir::Etc::sourceparts="-" \
                install -y postgresql-client
           then
+
+            POSTGRES_CLIENT_INSTALLED="true"
+
             break
+
           fi
+
         done <<< "${UBUNTU_SOURCE_FILES}"
+
+        if [ "${POSTGRES_CLIENT_INSTALLED}" != "true" ]; then
+          echo "ERROR - PostgreSQL client installation failed"
+          exit 1
+        fi
 
         echo "========================================"
         echo "VERIFY POSTGRESQL CLIENT"
@@ -105,7 +117,7 @@ phases:
 
         command -v pg-schema-diff
 
-        pg-schema-diff --version
+        pg-schema-diff version
 
         echo "Database CI/CD tooling is ready"
 
@@ -137,12 +149,15 @@ phases:
         fi
 
         case "${ENVIRONMENT}" in
+
           T1|T2)
             ;;
+
           *)
             echo "ERROR - ENVIRONMENT must be T1 or T2"
             exit 1
             ;;
+
         esac
 
         echo "Release branch is ${RELEASE_BRANCH}"
@@ -174,19 +189,41 @@ phases:
         echo "Resolved commit is ${CURRENT_COMMIT}"
 
         if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+
           echo "ERROR - checked out branch does not match RELEASE_BRANCH"
+
           exit 1
+
         fi
 
         echo "========================================"
         echo "VERIFY DATABASE CI/CD FILES"
         echo "========================================"
 
-        test -d Aurora-PostgreSQL-DB
-        test -f cicd/db/database-config.json
-        test -f cicd/db/scripts/create_release.sh
-        test -f cicd/db/scripts/load_secret.sh
-        test -f cicd/db/scripts/generate_plans.sh
+        if [ ! -d "Aurora-PostgreSQL-DB" ]; then
+          echo "ERROR - Aurora-PostgreSQL-DB directory is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/database-config.json" ]; then
+          echo "ERROR - cicd/db/database-config.json is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/scripts/create_release.sh" ]; then
+          echo "ERROR - create_release.sh is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/scripts/load_secret.sh" ]; then
+          echo "ERROR - load_secret.sh is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/scripts/generate_plans.sh" ]; then
+          echo "ERROR - generate_plans.sh is missing"
+          exit 1
+        fi
 
         chmod +x cicd/db/scripts/*.sh
 
@@ -197,6 +234,7 @@ phases:
         source cicd/db/scripts/load_secret.sh plan
 
         echo "Plan database credentials loaded successfully"
+
         echo "Database host is ${PGHOST}"
         echo "Database port is ${PGPORT}"
         echo "Database user is ${PGUSER}"
@@ -234,8 +272,13 @@ phases:
         echo "========================================"
 
         if [ -d "output" ]; then
+
           echo "Generated files:"
-          find output -type f -print
+
+          find output \
+            -type f \
+            -print
+
         fi
 
 
