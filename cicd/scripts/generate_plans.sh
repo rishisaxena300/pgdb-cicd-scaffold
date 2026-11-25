@@ -12,14 +12,22 @@ CONFIG_FILE="cicd/db/database-config.json"
 
 
 if [ ! -f "${CONFIG_FILE}" ]; then
-
   echo "ERROR - Database configuration file not found"
   echo "Expected file is ${CONFIG_FILE}"
-
   exit 1
-
 fi
 
+
+# ----------------------------------------------------------
+# Current implementation scope
+#
+# For now we are proving the flow using:
+#   Database: AWDIM
+#   Schema:   first AWDIM schema from database-config.json
+#
+# We will generalize this to loop through all configured
+# databases and schemas once this flow is working.
+# ----------------------------------------------------------
 
 DATABASE="AWDIM"
 
@@ -33,11 +41,8 @@ SCHEMA="$(
 
 
 if [ -z "${SCHEMA}" ]; then
-
   echo "ERROR - Schema is not configured for database ${DATABASE}"
-
   exit 1
-
 fi
 
 
@@ -45,6 +50,10 @@ echo "Environment is ${ENVIRONMENT}"
 echo "Database is ${DATABASE}"
 echo "Schema is '${SCHEMA}'"
 
+
+# ----------------------------------------------------------
+# Validate desired schema directory
+# ----------------------------------------------------------
 
 DESIRED_DIR="Aurora-PostgreSQL-DB/${DATABASE}/${SCHEMA}"
 
@@ -58,23 +67,21 @@ echo "Desired schema directory is ${DESIRED_DIR}"
 
 
 if [ ! -d "${DESIRED_DIR}" ]; then
-
   echo "ERROR - Desired schema directory does not exist"
   echo "Expected directory is ${DESIRED_DIR}"
-
   exit 1
-
 fi
 
+
+# ----------------------------------------------------------
+# Output directories
+# ----------------------------------------------------------
 
 BASE_DIR="output/${ENVIRONMENT}"
 
 BASELINE_DIR="${BASE_DIR}/baseline/${DATABASE}"
-
 FORWARD_DIR="${BASE_DIR}/forward/${DATABASE}"
-
 ROLLBACK_DIR="${BASE_DIR}/rollback/${DATABASE}"
-
 REVIEW_DIR="${BASE_DIR}/review/${DATABASE}"
 
 
@@ -84,6 +91,10 @@ mkdir -p \
   "${ROLLBACK_DIR}" \
   "${REVIEW_DIR}"
 
+
+# ----------------------------------------------------------
+# Verify database connectivity
+# ----------------------------------------------------------
 
 echo "========================================"
 echo "TEST DATABASE CONNECTIVITY"
@@ -101,6 +112,10 @@ psql \
 
 echo "Database connectivity successful"
 
+
+# ----------------------------------------------------------
+# Verify configured schema exists exactly as configured
+# ----------------------------------------------------------
 
 echo "========================================"
 echo "VERIFY SCHEMA EXISTS"
@@ -120,13 +135,12 @@ SCHEMA_EXISTS="$(
     --set ON_ERROR_STOP=1 \
     --tuples-only \
     --no-align \
-    --set="schema_name=${SCHEMA}" \
     --command="
       SELECT EXISTS
       (
         SELECT 1
         FROM information_schema.schemata
-        WHERE schema_name = :'schema_name'
+        WHERE schema_name = '${SCHEMA}'
       );
     "
 )"
@@ -164,25 +178,25 @@ fi
 echo "Schema '${SCHEMA}' exists in database '${DATABASE}'"
 
 
+# ----------------------------------------------------------
+# Capture current/live schema
+# ----------------------------------------------------------
+
 echo "========================================"
 echo "CAPTURE EXISTING SCHEMA"
 echo "========================================"
 
 
 BASELINE_FILE="${BASELINE_DIR}/${SCHEMA}.sql"
-
 BASELINE_HASH_FILE="${BASELINE_FILE}.sha256"
 
 
 #
-# pg_dump --schema accepts a pattern.
+# pg_dump treats --schema as a pattern.
 #
-# The database contains a quoted uppercase schema:
-#
-#   \"MAAS\"
-#
-# Therefore pass the quoted identifier as the pattern rather
-# than passing MAAS as an unquoted PostgreSQL identifier.
+# MAAS is an uppercase/quoted PostgreSQL identifier.
+# We therefore pass the identifier quotes as part of the
+# schema pattern.
 #
 
 SCHEMA_PATTERN="\"${SCHEMA}\""
@@ -207,16 +221,17 @@ pg_dump \
 
 
 if [ ! -s "${BASELINE_FILE}" ]; then
-
   echo "ERROR - Captured baseline schema file is empty"
-
   exit 1
-
 fi
 
 
 echo "Existing schema captured successfully"
 
+
+# ----------------------------------------------------------
+# Hash the starting schema
+# ----------------------------------------------------------
 
 echo "========================================"
 echo "CREATE BASELINE HASH"
@@ -237,13 +252,16 @@ BASELINE_SHA="$(
 echo "Baseline SHA256 is ${BASELINE_SHA}"
 
 
+# ----------------------------------------------------------
+# Generate forward migration
+# ----------------------------------------------------------
+
 echo "========================================"
 echo "GENERATE FORWARD MIGRATION"
 echo "========================================"
 
 
 FORWARD_FILE="${FORWARD_DIR}/${SCHEMA}.sql"
-
 FORWARD_HASH_FILE="${FORWARD_FILE}.sha256"
 
 
@@ -252,8 +270,8 @@ echo "Forward migration file is ${FORWARD_FILE}"
 
 
 #
-# Do not enable shell tracing here.
-# The DSN contains the database password.
+# Keep shell tracing disabled.
+# This DSN contains the plan-user password.
 #
 
 DB_DSN="postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DATABASE}"
@@ -266,11 +284,8 @@ pg-schema-diff plan \
 
 
 if [ ! -f "${FORWARD_FILE}" ]; then
-
   echo "ERROR - Forward migration file was not created"
-
   exit 1
-
 fi
 
 
@@ -286,92 +301,15 @@ FORWARD_SHA="$(
 
 
 echo "Forward migration generated successfully"
-
 echo "Forward migration SHA256 is ${FORWARD_SHA}"
 
+
+# ----------------------------------------------------------
+# Forward plan result
+# ----------------------------------------------------------
 
 echo "========================================"
 echo "FORWARD MIGRATION SUMMARY"
 echo "========================================"
 
 
-if [ -s "${FORWARD_FILE}" ]; then
-
-  echo "Database changes were detected"
-
-  echo "Migration file is ${FORWARD_FILE}"
-
-else
-
-  echo "No database schema changes were detected"
-
-fi
-
-
-echo "========================================"
-echo "UPLOAD RELEASE ARTIFACTS"
-echo "========================================"
-
-
-if [ ! -f "output/release-prefix.txt" ]; then
-
-  echo "ERROR - Release prefix file does not exist"
-
-  exit 1
-
-fi
-
-
-RELEASE_PREFIX="$(
-  cat output/release-prefix.txt |
-  xargs
-)"
-
-
-if [ -z "${RELEASE_PREFIX}" ]; then
-
-  echo "ERROR - Release prefix is empty"
-
-  exit 1
-
-fi
-
-
-echo "Release bucket is ${RELEASE_BUCKET}"
-
-echo "Release prefix is ${RELEASE_PREFIX}"
-
-
-aws s3 cp \
-  output/desired/ \
-  "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/desired/" \
-  --recursive
-
-
-aws s3 cp \
-  output/manifest.json \
-  "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/manifest.json"
-
-
-aws s3 cp \
-  "output/${ENVIRONMENT}/" \
-  "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/${ENVIRONMENT}/" \
-  --recursive
-
-
-echo "========================================"
-echo "GENERATION SUCCESSFUL"
-echo "========================================"
-
-
-echo "Environment is ${ENVIRONMENT}"
-
-echo "Database is ${DATABASE}"
-
-echo "Schema is ${SCHEMA}"
-
-echo "Baseline file is ${BASELINE_FILE}"
-
-echo "Forward migration file is ${FORWARD_FILE}"
-
-echo "Release location is s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/"
