@@ -11,6 +11,10 @@ echo "========================================"
 CONFIG_FILE="cicd/db/database-config.json"
 
 
+# ----------------------------------------------------------
+# Validate required inputs
+# ----------------------------------------------------------
+
 if [ ! -f "${CONFIG_FILE}" ]; then
   echo "ERROR - Database configuration file not found"
   echo "Expected file is ${CONFIG_FILE}"
@@ -18,7 +22,8 @@ if [ ! -f "${CONFIG_FILE}" ]; then
 fi
 
 
-if ! jq -e 'type == "object" and length > 0' \
+if ! jq -e \
+  'type == "object" and length > 0' \
   "${CONFIG_FILE}" >/dev/null
 then
   echo "ERROR - Database configuration is empty or invalid"
@@ -26,8 +31,44 @@ then
 fi
 
 
+if [ -z "${ENVIRONMENT:-}" ]; then
+  echo "ERROR - ENVIRONMENT is required"
+  exit 1
+fi
+
+
+if [ -z "${RELEASE_BUCKET:-}" ]; then
+  echo "ERROR - RELEASE_BUCKET is required"
+  exit 1
+fi
+
+
+if [ -z "${PGHOST:-}" ]; then
+  echo "ERROR - PGHOST is required"
+  exit 1
+fi
+
+
+if [ -z "${PGPORT:-}" ]; then
+  echo "ERROR - PGPORT is required"
+  exit 1
+fi
+
+
+if [ -z "${PGUSER:-}" ]; then
+  echo "ERROR - PGUSER is required"
+  exit 1
+fi
+
+
+if [ -z "${PGPASSWORD:-}" ]; then
+  echo "ERROR - PGPASSWORD is required"
+  exit 1
+fi
+
+
 # ----------------------------------------------------------
-# Verify release metadata produced by create_release.sh
+# Validate release files created by create_release.sh
 # ----------------------------------------------------------
 
 if [ ! -f "output/release-prefix.txt" ]; then
@@ -43,13 +84,13 @@ fi
 
 
 if [ ! -f "output/desired/desired-schema.zip" ]; then
-  echo "ERROR - desired-schema.zip does not exist"
+  echo "ERROR - output/desired/desired-schema.zip does not exist"
   exit 1
 fi
 
 
 if [ ! -f "output/desired/desired-schema.zip.sha256" ]; then
-  echo "ERROR - desired-schema.zip.sha256 does not exist"
+  echo "ERROR - output/desired/desired-schema.zip.sha256 does not exist"
   exit 1
 fi
 
@@ -71,10 +112,32 @@ S3_RELEASE_URI="s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}"
 echo "Environment is ${ENVIRONMENT}"
 echo "Release bucket is ${RELEASE_BUCKET}"
 echo "Release prefix is ${RELEASE_PREFIX}"
+echo "Release location is ${S3_RELEASE_URI}"
 
 
 # ----------------------------------------------------------
-# Read each database from database-config.json
+# Temporary workspace for pg-schema-diff desired-state DDL
+# ----------------------------------------------------------
+
+TEMP_ROOT="$(
+  mktemp -d
+)"
+
+
+cleanup()
+{
+  rm -rf "${TEMP_ROOT}"
+}
+
+
+trap cleanup EXIT
+
+
+echo "Temporary pg-schema-diff workspace is ${TEMP_ROOT}"
+
+
+# ----------------------------------------------------------
+# Read every configured database
 # ----------------------------------------------------------
 
 while IFS= read -r DATABASE
@@ -98,6 +161,12 @@ do
   )"
 
 
+  if ! [[ "${SCHEMA_COUNT}" =~ ^[0-9]+$ ]]; then
+    echo "ERROR - Invalid schema configuration for database ${DATABASE}"
+    exit 1
+  fi
+
+
   if [ "${SCHEMA_COUNT}" -eq 0 ]; then
     echo "ERROR - No schemas configured for database ${DATABASE}"
     exit 1
@@ -105,7 +174,7 @@ do
 
 
   # --------------------------------------------------------
-  # Test database connectivity once per database
+  # Test connectivity once per database
   # --------------------------------------------------------
 
   echo "========================================"
@@ -126,7 +195,7 @@ do
 
 
   # --------------------------------------------------------
-  # Read every configured schema for this database
+  # Process every schema configured for this database
   # --------------------------------------------------------
 
   while IFS= read -r SCHEMA
@@ -139,7 +208,7 @@ do
 
 
     echo "========================================"
-    echo "PROCESS DATABASE SCHEMA"
+    echo "PROCESS ${DATABASE}.${SCHEMA}"
     echo "========================================"
 
 
@@ -149,25 +218,103 @@ do
 
 
     # ------------------------------------------------------
-    # Desired schema directory
+    # Validate safe database/schema names
     # ------------------------------------------------------
 
-    DESIRED_DIR="Aurora-PostgreSQL-DB/${DATABASE}/${SCHEMA}"
-
-
-    echo "========================================"
-    echo "VERIFY DESIRED SCHEMA DIRECTORY"
-    echo "========================================"
-
-
-    echo "Desired schema directory is ${DESIRED_DIR}"
-
-
-    if [ ! -d "${DESIRED_DIR}" ]; then
-      echo "ERROR - Desired schema directory does not exist"
-      echo "Expected directory is ${DESIRED_DIR}"
+    if ! [[ "${DATABASE}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
+      echo "ERROR - Unsupported database identifier '${DATABASE}'"
       exit 1
     fi
+
+
+    if ! [[ "${SCHEMA}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
+      echo "ERROR - Unsupported schema identifier '${SCHEMA}'"
+      exit 1
+    fi
+
+
+    # ------------------------------------------------------
+    # Locate repository desired-state directory
+    # ------------------------------------------------------
+
+    REPOSITORY_DESIRED_DIR="Aurora-PostgreSQL-DB/${DATABASE}/${SCHEMA}"
+
+
+    echo "========================================"
+    echo "VERIFY REPOSITORY DESIRED STATE"
+    echo "========================================"
+
+
+    echo "Repository desired-state directory is:"
+    echo "${REPOSITORY_DESIRED_DIR}"
+
+
+    if [ ! -d "${REPOSITORY_DESIRED_DIR}" ]; then
+      echo "ERROR - Desired-state directory does not exist"
+      echo "Expected directory is ${REPOSITORY_DESIRED_DIR}"
+      exit 1
+    fi
+
+
+    # ------------------------------------------------------
+    # Build complete desired-state input for pg-schema-diff
+    #
+    # Git contains object DDL but does not need to contain
+    # schema.sql in every schema directory.
+    #
+    # The pipeline prepares:
+    #
+    #   temporary directory
+    #   ├── 000_schema.sql
+    #   ├── functions/
+    #   ├── tables/
+    #   ├── views/
+    #   └── ...
+    #
+    # 000_schema.sql is executed before dependent object DDL.
+    # ------------------------------------------------------
+
+    TEMP_DESIRED_DIR="${TEMP_ROOT}/${DATABASE}/${SCHEMA}"
+
+
+    rm -rf "${TEMP_DESIRED_DIR}"
+
+    mkdir -p "${TEMP_DESIRED_DIR}"
+
+
+    cp -a \
+      "${REPOSITORY_DESIRED_DIR}/." \
+      "${TEMP_DESIRED_DIR}/"
+
+
+    GENERATED_SCHEMA_FILE="${TEMP_DESIRED_DIR}/000_schema.sql"
+
+
+    printf 'CREATE SCHEMA "%s";\n' \
+      "${SCHEMA}" \
+      > "${GENERATED_SCHEMA_FILE}"
+
+
+    echo "========================================"
+    echo "PREPARE COMPLETE DESIRED STATE"
+    echo "========================================"
+
+
+    echo "Generated schema bootstrap file:"
+    echo "${GENERATED_SCHEMA_FILE}"
+
+
+    echo "Schema bootstrap DDL:"
+
+    cat "${GENERATED_SCHEMA_FILE}"
+
+
+    echo "Prepared desired-state files:"
+
+    find "${TEMP_DESIRED_DIR}" \
+      -type f \
+      -print \
+      | sort
 
 
     # ------------------------------------------------------
@@ -176,10 +323,13 @@ do
 
     BASE_DIR="output/${ENVIRONMENT}"
 
-    BASELINE_DIR="${BASE_DIR}/baseline/${DATABASE}"
-    FORWARD_DIR="${BASE_DIR}/forward/${DATABASE}"
-    ROLLBACK_DIR="${BASE_DIR}/rollback/${DATABASE}"
-    REVIEW_DIR="${BASE_DIR}/review/${DATABASE}"
+    BASELINE_DIR="${BASE_DIR}/baseline/${DATABASE}/${SCHEMA}"
+
+    FORWARD_DIR="${BASE_DIR}/forward/${DATABASE}/${SCHEMA}"
+
+    ROLLBACK_DIR="${BASE_DIR}/rollback/${DATABASE}/${SCHEMA}"
+
+    REVIEW_DIR="${BASE_DIR}/review/${DATABASE}/${SCHEMA}"
 
 
     mkdir -p \
@@ -190,16 +340,12 @@ do
 
 
     # ------------------------------------------------------
-    # Verify schema exists
+    # Verify live schema exists
     # ------------------------------------------------------
 
     echo "========================================"
-    echo "VERIFY SCHEMA EXISTS"
+    echo "VERIFY LIVE SCHEMA EXISTS"
     echo "========================================"
-
-
-    echo "Database is '${DATABASE}'"
-    echo "Configured schema is '${SCHEMA}'"
 
 
     SCHEMA_EXISTS="$(
@@ -263,9 +409,10 @@ do
     echo "========================================"
 
 
-    BASELINE_FILE="${BASELINE_DIR}/${SCHEMA}.sql"
+    BASELINE_FILE="${BASELINE_DIR}/schema.sql"
 
     BASELINE_HASH_FILE="${BASELINE_FILE}.sha256"
+
 
     SCHEMA_PATTERN="\"${SCHEMA}\""
 
@@ -298,7 +445,7 @@ do
 
 
     # ------------------------------------------------------
-    # Baseline SHA
+    # Hash baseline
     # ------------------------------------------------------
 
     echo "========================================"
@@ -329,18 +476,21 @@ do
     echo "========================================"
 
 
-    FORWARD_FILE="${FORWARD_DIR}/${SCHEMA}.sql"
+    FORWARD_FILE="${FORWARD_DIR}/migration.sql"
 
     FORWARD_HASH_FILE="${FORWARD_FILE}.sha256"
 
 
-    echo "Desired schema directory is ${DESIRED_DIR}"
-    echo "Forward migration file is ${FORWARD_FILE}"
+    echo "Prepared desired-state directory is:"
+    echo "${TEMP_DESIRED_DIR}"
+
+    echo "Forward migration file is:"
+    echo "${FORWARD_FILE}"
 
 
     #
     # Do not enable shell tracing.
-    # This variable contains the PLAN DB password.
+    # DB_DSN contains the PLAN database password.
     #
 
     DB_DSN="postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DATABASE}"
@@ -348,7 +498,7 @@ do
 
     pg-schema-diff plan \
       --from-dsn="${DB_DSN}" \
-      --to-dir="${DESIRED_DIR}" \
+      --to-dir="${TEMP_DESIRED_DIR}" \
       > "${FORWARD_FILE}"
 
 
@@ -370,11 +520,12 @@ do
 
 
     echo "Forward migration generated successfully"
+
     echo "Forward migration SHA256 is ${FORWARD_SHA}"
 
 
     # ------------------------------------------------------
-    # Forward plan summary
+    # Forward migration summary
     # ------------------------------------------------------
 
     echo "========================================"
@@ -385,6 +536,8 @@ do
     if [ -s "${FORWARD_FILE}" ]; then
 
       echo "Database schema changes were detected"
+
+      echo "Migration file is ${FORWARD_FILE}"
 
     else
 
@@ -404,12 +557,12 @@ do
 
     aws s3 cp \
       "${BASELINE_FILE}" \
-      "${S3_RELEASE_URI}/${ENVIRONMENT}/baseline/${DATABASE}/${SCHEMA}.sql"
+      "${S3_RELEASE_URI}/${ENVIRONMENT}/baseline/${DATABASE}/${SCHEMA}/schema.sql"
 
 
     aws s3 cp \
       "${BASELINE_HASH_FILE}" \
-      "${S3_RELEASE_URI}/${ENVIRONMENT}/baseline/${DATABASE}/${SCHEMA}.sql.sha256"
+      "${S3_RELEASE_URI}/${ENVIRONMENT}/baseline/${DATABASE}/${SCHEMA}/schema.sql.sha256"
 
 
     # ------------------------------------------------------
@@ -423,12 +576,12 @@ do
 
     aws s3 cp \
       "${FORWARD_FILE}" \
-      "${S3_RELEASE_URI}/${ENVIRONMENT}/forward/${DATABASE}/${SCHEMA}.sql"
+      "${S3_RELEASE_URI}/${ENVIRONMENT}/forward/${DATABASE}/${SCHEMA}/migration.sql"
 
 
     aws s3 cp \
       "${FORWARD_HASH_FILE}" \
-      "${S3_RELEASE_URI}/${ENVIRONMENT}/forward/${DATABASE}/${SCHEMA}.sql.sha256"
+      "${S3_RELEASE_URI}/${ENVIRONMENT}/forward/${DATABASE}/${SCHEMA}/migration.sql.sha256"
 
 
     echo "Completed ${DATABASE}.${SCHEMA}"
@@ -450,7 +603,7 @@ done < <(
 
 
 # ----------------------------------------------------------
-# Upload desired schema once
+# Upload desired schema once per release
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -469,7 +622,7 @@ aws s3 cp \
 
 
 # ----------------------------------------------------------
-# Upload manifest once
+# Upload manifest once per release
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -483,7 +636,7 @@ aws s3 cp \
 
 
 # ----------------------------------------------------------
-# Verify S3 release
+# Verify uploaded S3 release
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -497,7 +650,7 @@ aws s3 ls \
 
 
 # ----------------------------------------------------------
-# Final
+# Complete
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -506,4 +659,5 @@ echo "========================================"
 
 
 echo "Environment is ${ENVIRONMENT}"
+
 echo "Release location is ${S3_RELEASE_URI}/"
