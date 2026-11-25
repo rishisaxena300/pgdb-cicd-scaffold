@@ -2,32 +2,61 @@ version: 0.2
 
 env:
   shell: bash
+
   variables:
     PG_SCHEMA_DIFF_VERSION: "v1.0.9"
 
 phases:
+
   install:
+
     runtime-versions:
       golang: 1.27
 
     commands:
+
       - |
         set -euo pipefail
 
         echo "========================================"
         echo "BACH DB CI/CD - GENERATE"
         echo "========================================"
-        echo "INSTALL DATABASE CI/CD TOOLS"
+
+        echo "========================================"
+        echo "VERIFY BASE CODEBUILD TOOLS"
         echo "========================================"
 
-        apt-get update
+        command -v git
+        command -v jq
+        command -v zip
+        command -v unzip
+        command -v aws
+        command -v go
 
-        DEBIAN_FRONTEND=noninteractive apt-get install -y \
-          postgresql-client \
-          jq \
-          zip \
-          unzip \
-          ca-certificates
+        git --version
+        jq --version
+        zip -v | head -1
+        aws --version
+        go version
+
+        echo "========================================"
+        echo "CHECK POSTGRESQL CLIENT TOOLS"
+        echo "========================================"
+
+        if ! command -v psql >/dev/null 2>&1; then
+          echo "ERROR - psql is not available in the selected CodeBuild image"
+          echo "Install the PostgreSQL client in the CodeBuild environment before continuing"
+          exit 1
+        fi
+
+        if ! command -v pg_dump >/dev/null 2>&1; then
+          echo "ERROR - pg_dump is not available in the selected CodeBuild image"
+          echo "Install the PostgreSQL client in the CodeBuild environment before continuing"
+          exit 1
+        fi
+
+        psql --version
+        pg_dump --version
 
         echo "========================================"
         echo "INSTALL PG-SCHEMA-DIFF"
@@ -39,29 +68,25 @@ phases:
         go install github.com/stripe/pg-schema-diff/cmd/pg-schema-diff@${PG_SCHEMA_DIFF_VERSION}
 
         echo "========================================"
-        echo "VERIFY INSTALLED TOOLS"
+        echo "VERIFY PG-SCHEMA-DIFF"
         echo "========================================"
 
         command -v pg-schema-diff
-        command -v psql
-        command -v pg_dump
-        command -v jq
-        command -v aws
 
-        go version
         pg-schema-diff --version
-        psql --version
-        pg_dump --version
-        jq --version
-        aws --version
+
+        echo "Database CI/CD tooling is ready"
+
 
   pre_build:
+
     commands:
+
       - |
         set -euo pipefail
 
         echo "========================================"
-        echo "VALIDATE BUILD INPUTS"
+        echo "VALIDATE PIPELINE INPUT"
         echo "========================================"
 
         if [ -z "${RELEASE_BRANCH:-}" ]; then
@@ -79,66 +104,99 @@ phases:
           exit 1
         fi
 
-        if [ "${ENVIRONMENT}" != "T1" ] && [ "${ENVIRONMENT}" != "T2" ]; then
-          echo "ERROR - ENVIRONMENT must be T1 or T2"
-          exit 1
-        fi
+        case "${ENVIRONMENT}" in
 
-        echo "Requested release branch is ${RELEASE_BRANCH}"
+          T1|T2)
+            ;;
+
+          *)
+            echo "ERROR - ENVIRONMENT must be T1 or T2"
+            exit 1
+            ;;
+
+        esac
+
+        echo "Release branch is ${RELEASE_BRANCH}"
         echo "Target environment is ${ENVIRONMENT}"
         echo "Release bucket is ${RELEASE_BUCKET}"
 
         echo "========================================"
-        echo "CHECKOUT REQUESTED RELEASE BRANCH"
+        echo "CHECKOUT RELEASE BRANCH"
         echo "========================================"
 
         git remote -v
 
         git fetch origin "${RELEASE_BRANCH}"
 
-        git checkout -B "${RELEASE_BRANCH}" "origin/${RELEASE_BRANCH}"
+        git checkout -B \
+          "${RELEASE_BRANCH}" \
+          "origin/${RELEASE_BRANCH}"
 
-        CURRENT_BRANCH="$(git branch --show-current)"
-        CURRENT_COMMIT="$(git rev-parse HEAD)"
+        CURRENT_BRANCH="$(
+          git branch --show-current
+        )"
+
+        CURRENT_COMMIT="$(
+          git rev-parse HEAD
+        )"
 
         echo "Requested branch is ${RELEASE_BRANCH}"
         echo "Checked out branch is ${CURRENT_BRANCH}"
         echo "Resolved commit is ${CURRENT_COMMIT}"
 
         if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
-          echo "ERROR - checked out branch does not match RELEASE_BRANCH"
+          echo "ERROR - checked out Git branch does not match RELEASE_BRANCH"
           exit 1
         fi
 
         echo "========================================"
-        echo "VERIFY DATABASE CI/CD FILES"
+        echo "VERIFY REPOSITORY STRUCTURE"
         echo "========================================"
 
-        test -d Aurora-PostgreSQL-DB
-        test -d cicd/db
-        test -d cicd/db/scripts
+        if [ ! -d "Aurora-PostgreSQL-DB" ]; then
+          echo "ERROR - Aurora-PostgreSQL-DB directory is missing"
+          exit 1
+        fi
 
-        test -f cicd/db/database-config.json
-        test -f cicd/db/scripts/create_release.sh
-        test -f cicd/db/scripts/load_secret.sh
-        test -f cicd/db/scripts/generate_plans.sh
+        if [ ! -f "cicd/db/database-config.json" ]; then
+          echo "ERROR - cicd/db/database-config.json is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/scripts/create_release.sh" ]; then
+          echo "ERROR - create_release.sh is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/scripts/load_secret.sh" ]; then
+          echo "ERROR - load_secret.sh is missing"
+          exit 1
+        fi
+
+        if [ ! -f "cicd/db/scripts/generate_plans.sh" ]; then
+          echo "ERROR - generate_plans.sh is missing"
+          exit 1
+        fi
 
         chmod +x cicd/db/scripts/*.sh
 
         echo "========================================"
-        echo "LOAD PLAN DATABASE SECRET"
+        echo "LOAD PLAN DATABASE CREDENTIALS"
         echo "========================================"
 
         source cicd/db/scripts/load_secret.sh plan
 
-        echo "Plan database secret loaded successfully"
+        echo "Plan database credentials loaded successfully"
 
         echo "Database host is ${PGHOST}"
         echo "Database port is ${PGPORT}"
         echo "Database user is ${PGUSER}"
 
+
   build:
+
     commands:
+
       - |
         set -euo pipefail
 
@@ -149,24 +207,37 @@ phases:
         cicd/db/scripts/create_release.sh
 
         echo "========================================"
-        echo "GENERATE DATABASE MIGRATION"
+        echo "GENERATE DATABASE PLANS"
         echo "========================================"
 
         cicd/db/scripts/generate_plans.sh
 
+
   post_build:
+
     commands:
+
       - |
+        set -euo pipefail
+
         echo "========================================"
         echo "DATABASE PLAN GENERATION COMPLETED"
         echo "========================================"
 
-        if [ -d output ]; then
+        if [ -d "output" ]; then
+
           echo "Generated files:"
-          find output -type f -print
+
+          find output \
+            -type f \
+            -print
+
         fi
 
+
 artifacts:
+
   files:
     - "output/**/*"
+
   discard-paths: no
