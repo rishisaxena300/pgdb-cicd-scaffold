@@ -4,5 +4,6 @@ CREATE TABLE IF NOT EXISTS "MAAS"."Customer"
     customer_name VARCHAR(150) NOT NULL,
     email VARCHAR(255) NOT NULL UNIQUE,
     city VARCHAR(100),
+    phone_number VARCHAR(20),
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
