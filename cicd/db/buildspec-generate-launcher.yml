@@ -1,0 +1,327 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+
+  build:
+
+    commands:
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "DATABASE GENERATE LAUNCHER"
+        echo "========================================"
+
+        for variable in \
+          RELEASE_BRANCH \
+          ENVIRONMENT \
+          GENERATE_PROJECT \
+          RELEASE_BUCKET
+        do
+
+          if [ -z "${!variable:-}" ]; then
+            echo "ERROR - ${variable} is missing"
+            exit 1
+          fi
+
+        done
+
+        if [ "${RELEASE_BRANCH}" = "placeholder" ]; then
+          echo "ERROR - RELEASE_BRANCH was not overridden"
+          exit 1
+        fi
+
+        if [ "${ENVIRONMENT}" = "placeholder" ]; then
+          echo "ERROR - ENVIRONMENT was not overridden"
+          exit 1
+        fi
+
+        RELEASE_BRANCH="$(
+          printf '%s' "${RELEASE_BRANCH}" |
+          xargs
+        )"
+
+        ENVIRONMENT="$(
+          printf '%s' "${ENVIRONMENT}" |
+          xargs |
+          tr '[:lower:]' '[:upper:]'
+        )"
+
+        export RELEASE_BRANCH
+        export ENVIRONMENT
+
+        case "${ENVIRONMENT}" in
+
+          T1|T2)
+            ;;
+
+          *)
+            echo "ERROR - ENVIRONMENT must be T1 or T2"
+            echo "Received value is '${ENVIRONMENT}'"
+            exit 1
+            ;;
+
+        esac
+
+        echo "RELEASE_BRANCH=${RELEASE_BRANCH}"
+        echo "ENVIRONMENT=${ENVIRONMENT}"
+        echo "GENERATE_PROJECT=${GENERATE_PROJECT}"
+        echo "RELEASE_BUCKET=${RELEASE_BUCKET}"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "START DATABASE GENERATE BUILD"
+        echo "========================================"
+
+        BUILD_ID="$(
+          aws codebuild start-build \
+            --project-name "${GENERATE_PROJECT}" \
+            --source-version "${RELEASE_BRANCH}" \
+            --environment-variables-override \
+              name=RELEASE_BRANCH,value="${RELEASE_BRANCH}",type=PLAINTEXT \
+              name=ENVIRONMENT,value="${ENVIRONMENT}",type=PLAINTEXT \
+            --query 'build.id' \
+            --output text
+        )"
+
+        if [ -z "${BUILD_ID}" ] || \
+           [ "${BUILD_ID}" = "None" ]
+        then
+          echo "ERROR - No child build ID returned"
+          exit 1
+        fi
+
+        printf '%s\n' "${BUILD_ID}" \
+          > /tmp/generate-build-id
+
+        echo "BUILD_ID=${BUILD_ID}"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "WAIT FOR DATABASE GENERATE BUILD"
+        echo "========================================"
+
+        BUILD_ID="$(
+          cat /tmp/generate-build-id
+        )"
+
+        while true
+        do
+
+          BUILD_STATUS="$(
+            aws codebuild batch-get-builds \
+              --ids "${BUILD_ID}" \
+              --query 'builds[0].buildStatus' \
+              --output text
+          )"
+
+          echo "Generate status=${BUILD_STATUS}"
+
+          case "${BUILD_STATUS}" in
+
+            SUCCEEDED)
+              echo "Generate build succeeded"
+              break
+              ;;
+
+            FAILED|FAULT|STOPPED|TIMED_OUT)
+              echo "ERROR - Generate build ${BUILD_STATUS}"
+              exit 1
+              ;;
+
+            IN_PROGRESS)
+              sleep 10
+              ;;
+
+            *)
+              echo "ERROR - Unexpected Generate status '${BUILD_STATUS}'"
+              exit 1
+              ;;
+
+          esac
+
+        done
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "GET GENERATED RELEASE INFORMATION"
+        echo "========================================"
+
+        BUILD_ID="$(
+          cat /tmp/generate-build-id
+        )"
+
+        RELEASE_COMMIT="$(
+          aws codebuild batch-get-builds \
+            --ids "${BUILD_ID}" \
+            --query 'builds[0].resolvedSourceVersion' \
+            --output text
+        )"
+
+        SOURCE_VERSION="$(
+          aws codebuild batch-get-builds \
+            --ids "${BUILD_ID}" \
+            --query 'builds[0].sourceVersion' \
+            --output text
+        )"
+
+        if [ -z "${RELEASE_COMMIT}" ] || \
+           [ "${RELEASE_COMMIT}" = "None" ]
+        then
+          echo "ERROR - Unable to determine release commit"
+          exit 1
+        fi
+
+        if [ "${SOURCE_VERSION}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - Child build source version mismatch"
+          echo "Requested branch is ${RELEASE_BRANCH}"
+          echo "Child source version is ${SOURCE_VERSION}"
+          exit 1
+        fi
+
+        RELEASE_BRANCH_KEY="$(
+          printf '%s' "${RELEASE_BRANCH}" |
+          tr '/' '-'
+        )"
+
+        SHORT_COMMIT="${RELEASE_COMMIT:0:8}"
+
+        RELEASE_PREFIX="releases/${RELEASE_BRANCH_KEY}/${SHORT_COMMIT}"
+
+        echo "RELEASE_BRANCH=${RELEASE_BRANCH}"
+        echo "SOURCE_VERSION=${SOURCE_VERSION}"
+        echo "RELEASE_COMMIT=${RELEASE_COMMIT}"
+        echo "RELEASE_PREFIX=${RELEASE_PREFIX}"
+
+        jq -n \
+          --arg release_branch "${RELEASE_BRANCH}" \
+          --arg environment "${ENVIRONMENT}" \
+          --arg release_commit "${RELEASE_COMMIT}" \
+          --arg release_prefix "${RELEASE_PREFIX}" \
+          --arg generate_build_id "${BUILD_ID}" \
+          '{
+            release_branch: $release_branch,
+            environment: $environment,
+            release_commit: $release_commit,
+            release_prefix: $release_prefix,
+            generate_build_id: $generate_build_id
+          }' \
+          > /tmp/generated-release.json
+
+        echo "Generated release metadata:"
+
+        cat /tmp/generated-release.json
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VERIFY GENERATED RELEASE"
+        echo "========================================"
+
+        RELEASE_PREFIX="$(
+          jq -r '.release_prefix' \
+            /tmp/generated-release.json
+        )"
+
+        RELEASE_COMMIT="$(
+          jq -r '.release_commit' \
+            /tmp/generated-release.json
+        )"
+
+        echo "Release location:"
+        echo "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/"
+
+        aws s3api head-object \
+          --bucket "${RELEASE_BUCKET}" \
+          --key "${RELEASE_PREFIX}/manifest.json" \
+          >/dev/null
+
+        aws s3api head-object \
+          --bucket "${RELEASE_BUCKET}" \
+          --key "${RELEASE_PREFIX}/desired/desired-schema.zip" \
+          >/dev/null
+
+        aws s3api head-object \
+          --bucket "${RELEASE_BUCKET}" \
+          --key "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256" \
+          >/dev/null
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/manifest.json" \
+          /tmp/db-release-manifest.json
+
+        MANIFEST_BRANCH="$(
+          jq -r '.release_branch // empty' \
+            /tmp/db-release-manifest.json
+        )"
+
+        MANIFEST_COMMIT="$(
+          jq -r '.git_commit // empty' \
+            /tmp/db-release-manifest.json
+        )"
+
+        if [ "${MANIFEST_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - Manifest release branch mismatch"
+          echo "Requested=${RELEASE_BRANCH}"
+          echo "Manifest=${MANIFEST_BRANCH}"
+          exit 1
+        fi
+
+        if [ "${MANIFEST_COMMIT}" != "${RELEASE_COMMIT}" ]; then
+          echo "ERROR - Manifest commit mismatch"
+          echo "Child build=${RELEASE_COMMIT}"
+          echo "Manifest=${MANIFEST_COMMIT}"
+          exit 1
+        fi
+
+        echo "Generated release identity verified"
+
+        echo "Generated environment artifacts:"
+
+        aws s3 ls \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/${ENVIRONMENT}/" \
+          --recursive
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "PUBLISH PENDING DATABASE RELEASE POINTER"
+        echo "========================================"
+
+        aws s3 cp \
+          /tmp/generated-release.json \
+          "s3://${RELEASE_BUCKET}/pending-release/${ENVIRONMENT}/current.json"
+
+        echo "Pending release pointer published"
+
+
+      - |
+        echo "========================================"
+        echo "DATABASE GENERATE LAUNCHER COMPLETE"
+        echo "========================================"
+
+        echo "Release branch:"
+        echo "${RELEASE_BRANCH}"
+
+        echo "Environment:"
+        echo "${ENVIRONMENT}"
+
+        echo "The generated database release can now"
+        echo "proceed to the next pipeline stage."
