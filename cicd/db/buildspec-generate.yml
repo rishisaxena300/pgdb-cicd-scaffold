@@ -2,6 +2,7 @@ version: 0.2
 
 env:
   shell: bash
+  git-credential-helper: yes
 
 phases:
 
@@ -151,13 +152,11 @@ phases:
 
         if [ ! -x "${POSTGRES_BIN_DIR}/psql" ]; then
           echo "ERROR - psql was not installed at the expected location"
-          echo "Expected ${POSTGRES_BIN_DIR}/psql"
           exit 1
         fi
 
         if [ ! -x "${POSTGRES_BIN_DIR}/pg_dump" ]; then
           echo "ERROR - pg_dump was not installed at the expected location"
-          echo "Expected ${POSTGRES_BIN_DIR}/pg_dump"
           exit 1
         fi
 
@@ -176,10 +175,6 @@ phases:
         echo "========================================"
         echo "VERIFY POSTGRESQL CLIENT"
         echo "========================================"
-
-        command -v psql
-        command -v pg_dump
-        command -v pg_restore
 
         psql --version
         pg_dump --version
@@ -308,19 +303,39 @@ phases:
         echo "CHECKOUT RELEASE BRANCH"
         echo "========================================"
 
+        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
+          echo "ERROR - CodeBuild source is not a Git repository"
+          echo "CodePipeline Source must use Full clone"
+          exit 1
+        fi
+
+        echo "Initial source commit:"
+        git rev-parse HEAD
+
+        echo "Git remote:"
         git remote -v
 
-        echo "Fetching branch ${RELEASE_BRANCH}"
+        echo "Fetching requested release branch ${RELEASE_BRANCH}"
 
         git fetch \
           origin \
-          "${RELEASE_BRANCH}"
+          "${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
 
-        echo "Checking out branch ${RELEASE_BRANCH}"
+        if ! git show-ref \
+          --verify \
+          --quiet \
+          "refs/remotes/origin/${RELEASE_BRANCH}"
+        then
+          echo "ERROR - requested release branch was not fetched"
+          echo "Branch is ${RELEASE_BRANCH}"
+          exit 1
+        fi
+
+        echo "Checking out requested release branch ${RELEASE_BRANCH}"
 
         git checkout \
           -B "${RELEASE_BRANCH}" \
-          "origin/${RELEASE_BRANCH}"
+          "refs/remotes/origin/${RELEASE_BRANCH}"
 
         CURRENT_BRANCH="$(
           git branch --show-current
@@ -330,14 +345,29 @@ phases:
           git rev-parse HEAD
         )"
 
+        REMOTE_COMMIT="$(
+          git rev-parse \
+            "refs/remotes/origin/${RELEASE_BRANCH}"
+        )"
+
         echo "Requested branch is ${RELEASE_BRANCH}"
         echo "Checked out branch is ${CURRENT_BRANCH}"
-        echo "Resolved commit is ${CURRENT_COMMIT}"
+        echo "Local commit is ${CURRENT_COMMIT}"
+        echo "Fetched release branch commit is ${REMOTE_COMMIT}"
 
         if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
           echo "ERROR - checked out branch does not match RELEASE_BRANCH"
           exit 1
         fi
+
+        if [ "${CURRENT_COMMIT}" != "${REMOTE_COMMIT}" ]; then
+          echo "ERROR - local commit does not match fetched release branch"
+          exit 1
+        fi
+
+        export CURRENT_COMMIT
+
+        echo "Release source validated successfully"
 
         echo "========================================"
         echo "VERIFY DATABASE CI/CD FILES"
@@ -436,6 +466,26 @@ phases:
 
       - |
         set -euo pipefail
+
+        echo "========================================"
+        echo "VERIFY RELEASE SOURCE BEFORE GENERATION"
+        echo "========================================"
+
+        BUILD_BRANCH="$(
+          git branch --show-current
+        )"
+
+        BUILD_COMMIT="$(
+          git rev-parse HEAD
+        )"
+
+        echo "Generating from branch ${BUILD_BRANCH}"
+        echo "Generating from commit ${BUILD_COMMIT}"
+
+        if [ "${BUILD_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - build is not running from requested RELEASE_BRANCH"
+          exit 1
+        fi
 
         echo "========================================"
         echo "CREATE DESIRED SCHEMA BUNDLE"
