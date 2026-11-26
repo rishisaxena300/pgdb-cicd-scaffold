@@ -52,7 +52,7 @@ phases:
 
         esac
 
-        echo "Environment=${ENVIRONMENT}"
+        echo "Plan environment=${ENVIRONMENT}"
         echo "Release bucket=${RELEASE_BUCKET}"
 
 
@@ -95,12 +95,6 @@ phases:
             /tmp/pending-release.json
         )"
 
-        RELEASE_BRANCH_KEY="$(
-          jq -r \
-            '.release_branch_key // empty' \
-            /tmp/pending-release.json
-        )"
-
         RELEASE_COMMIT="$(
           jq -r \
             '.release_commit // empty' \
@@ -125,13 +119,26 @@ phases:
             /tmp/pending-release.json
         )"
 
+        DATABASE_COUNT="$(
+          jq -r \
+            '.database_count // 0' \
+            /tmp/pending-release.json
+        )"
+
+        SCHEMA_COUNT="$(
+          jq -r \
+            '.schema_count // 0' \
+            /tmp/pending-release.json
+        )"
+
+        GENERATE_BUILD_ID="$(
+          jq -r \
+            '.generate_build_id // empty' \
+            /tmp/pending-release.json
+        )"
+
         if [ -z "${RELEASE_BRANCH}" ]; then
           echo "ERROR - release_branch is missing"
-          exit 1
-        fi
-
-        if [ -z "${RELEASE_BRANCH_KEY}" ]; then
-          echo "ERROR - release_branch_key is missing"
           exit 1
         fi
 
@@ -145,10 +152,15 @@ phases:
           exit 1
         fi
 
+        if [ -z "${RELEASE_ENVIRONMENT}" ]; then
+          echo "ERROR - environment is missing"
+          exit 1
+        fi
+
         if [ "${RELEASE_ENVIRONMENT}" != "${ENVIRONMENT}" ]; then
           echo "ERROR - Pending release environment mismatch"
-          echo "Pipeline environment=${ENVIRONMENT}"
-          echo "Release environment=${RELEASE_ENVIRONMENT}"
+          echo "Pipeline plan environment=${ENVIRONMENT}"
+          echo "Release plan environment=${RELEASE_ENVIRONMENT}"
           exit 1
         fi
 
@@ -157,14 +169,32 @@ phases:
           exit 1
         fi
 
+        if ! [[ "${DATABASE_COUNT}" =~ ^[0-9]+$ ]] || \
+           [ "${DATABASE_COUNT}" -eq 0 ]
+        then
+          echo "ERROR - Invalid database_count"
+          echo "database_count=${DATABASE_COUNT}"
+          exit 1
+        fi
+
+        if ! [[ "${SCHEMA_COUNT}" =~ ^[0-9]+$ ]] || \
+           [ "${SCHEMA_COUNT}" -eq 0 ]
+        then
+          echo "ERROR - Invalid schema_count"
+          echo "schema_count=${SCHEMA_COUNT}"
+          exit 1
+        fi
+
         export RELEASE_BRANCH
-        export RELEASE_BRANCH_KEY
         export RELEASE_COMMIT
         export RELEASE_PREFIX
 
         echo "Release branch=${RELEASE_BRANCH}"
         echo "Release commit=${RELEASE_COMMIT}"
         echo "Release prefix=${RELEASE_PREFIX}"
+        echo "Plan environment=${RELEASE_ENVIRONMENT}"
+        echo "Database count=${DATABASE_COUNT}"
+        echo "Schema count=${SCHEMA_COUNT}"
 
 
       - |
@@ -201,6 +231,14 @@ phases:
           "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/manifest.json" \
           /tmp/release-manifest.json
 
+        if ! jq -e . \
+          /tmp/release-manifest.json \
+          >/dev/null
+        then
+          echo "ERROR - Release manifest is invalid JSON"
+          exit 1
+        fi
+
         MANIFEST_BRANCH="$(
           jq -r \
             '.release_branch // empty' \
@@ -234,14 +272,69 @@ phases:
         set -euo pipefail
 
         echo "========================================"
+        echo "VERIFY DESIRED SCHEMA CHECKSUM"
+        echo "========================================"
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/desired/desired-schema.zip" \
+          /tmp/desired-schema.zip
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/desired/desired-schema.zip.sha256" \
+          /tmp/desired-schema.zip.sha256
+
+        EXPECTED_SHA="$(
+          awk '{print $1}' \
+            /tmp/desired-schema.zip.sha256
+        )"
+
+        ACTUAL_SHA="$(
+          sha256sum \
+            /tmp/desired-schema.zip |
+          awk '{print $1}'
+        )"
+
+        if [ -z "${EXPECTED_SHA}" ]; then
+          echo "ERROR - Desired schema expected SHA256 is empty"
+          exit 1
+        fi
+
+        if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+          echo "ERROR - Desired schema checksum mismatch"
+          echo "Expected=${EXPECTED_SHA}"
+          echo "Actual=${ACTUAL_SHA}"
+          exit 1
+        fi
+
+        echo "Desired schema checksum verified"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
         echo "CREATE APPROVED RELEASE POINTER"
         echo "========================================"
 
-        jq \
-          '. + {
+        jq -n \
+          --arg release_branch "${RELEASE_BRANCH}" \
+          --arg release_commit "${RELEASE_COMMIT}" \
+          --arg release_prefix "${RELEASE_PREFIX}" \
+          --arg plan_environment "${ENVIRONMENT}" \
+          --arg generate_build_id "${GENERATE_BUILD_ID}" \
+          --argjson database_count "${DATABASE_COUNT}" \
+          --argjson schema_count "${SCHEMA_COUNT}" \
+          '{
+            release_branch: $release_branch,
+            release_commit: $release_commit,
+            release_prefix: $release_prefix,
+            plan_environment: $plan_environment,
+            generate_build_id: $generate_build_id,
+            database_count: $database_count,
+            schema_count: $schema_count,
+            release_complete: true,
             approved: true
           }' \
-          /tmp/pending-release.json \
           > /tmp/approved-release.json
 
         if ! jq -e . \
@@ -264,7 +357,7 @@ phases:
         echo "PUBLISH APPROVED RELEASE"
         echo "========================================"
 
-        APPROVED_KEY="approved-release/${ENVIRONMENT}/current.json"
+        APPROVED_KEY="approved-release/current.json"
 
         aws s3 cp \
           /tmp/approved-release.json \
@@ -282,7 +375,7 @@ phases:
         echo "========================================"
 
         aws s3 cp \
-          "s3://${RELEASE_BUCKET}/approved-release/${ENVIRONMENT}/current.json" \
+          "s3://${RELEASE_BUCKET}/approved-release/current.json" \
           /tmp/verify-approved-release.json
 
         if ! cmp -s \
@@ -299,8 +392,30 @@ phases:
             /tmp/verify-approved-release.json
         )"
 
+        VERIFIED_PREFIX="$(
+          jq -r \
+            '.release_prefix // empty' \
+            /tmp/verify-approved-release.json
+        )"
+
+        VERIFIED_COMMIT="$(
+          jq -r \
+            '.release_commit // empty' \
+            /tmp/verify-approved-release.json
+        )"
+
         if [ "${APPROVED}" != "true" ]; then
           echo "ERROR - Release is not marked approved"
+          exit 1
+        fi
+
+        if [ "${VERIFIED_PREFIX}" != "${RELEASE_PREFIX}" ]; then
+          echo "ERROR - Approved release prefix mismatch"
+          exit 1
+        fi
+
+        if [ "${VERIFIED_COMMIT}" != "${RELEASE_COMMIT}" ]; then
+          echo "ERROR - Approved release commit mismatch"
           exit 1
         fi
 
@@ -312,9 +427,6 @@ phases:
         echo "DATABASE RELEASE APPROVED"
         echo "========================================"
 
-        echo "Environment:"
-        echo "${ENVIRONMENT}"
-
         echo "Release branch:"
         echo "${RELEASE_BRANCH}"
 
@@ -323,3 +435,12 @@ phases:
 
         echo "Release prefix:"
         echo "${RELEASE_PREFIX}"
+
+        echo "Plan environment:"
+        echo "${ENVIRONMENT}"
+
+        echo "Approved release pointer:"
+        echo "s3://${RELEASE_BUCKET}/approved-release/current.json"
+
+        echo "This approved release can now be"
+        echo "consumed by separate deployment pipelines."
