@@ -5,7 +5,7 @@ AS $function$
 BEGIN
     NEW.customer_name := TRIM(NEW.customer_name);
     NEW.email := LOWER(TRIM(NEW.email));
-    NEW.city := TRIM(NEW.city);
+    NEW.city := UPPER(TRIM(NEW.city));
     RETURN NEW;
 END;
 $function$;
