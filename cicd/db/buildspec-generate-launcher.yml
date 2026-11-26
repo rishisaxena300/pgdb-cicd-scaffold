@@ -22,12 +22,10 @@ phases:
           GENERATE_PROJECT \
           RELEASE_BUCKET
         do
-
           if [ -z "${!variable:-}" ]; then
             echo "ERROR - ${variable} is missing"
             exit 1
           fi
-
         done
 
         if [ "${RELEASE_BRANCH}" = "placeholder" ]; then
@@ -67,16 +65,13 @@ phases:
         export RELEASE_BUCKET
 
         case "${ENVIRONMENT}" in
-
           T1|T2)
             ;;
-
           *)
             echo "ERROR - ENVIRONMENT must be T1 or T2"
             echo "Received value is '${ENVIRONMENT}'"
             exit 1
             ;;
-
         esac
 
         echo "RELEASE_BRANCH=${RELEASE_BRANCH}"
@@ -129,7 +124,6 @@ phases:
 
         while true
         do
-
           BUILD_STATUS="$(
             aws codebuild batch-get-builds \
               --ids "${BUILD_ID}" \
@@ -140,28 +134,22 @@ phases:
           echo "Generate status=${BUILD_STATUS}"
 
           case "${BUILD_STATUS}" in
-
             SUCCEEDED)
               echo "Generate build succeeded"
               break
               ;;
-
             FAILED|FAULT|STOPPED|TIMED_OUT)
               echo "ERROR - Generate build ${BUILD_STATUS}"
               exit 1
               ;;
-
             IN_PROGRESS)
               sleep 10
               ;;
-
             *)
               echo "ERROR - Unexpected Generate status '${BUILD_STATUS}'"
               exit 1
               ;;
-
           esac
-
         done
 
 
@@ -206,46 +194,34 @@ phases:
 
         if [ "${SOURCE_VERSION}" != "${RELEASE_BRANCH}" ]; then
           echo "ERROR - Child build source version mismatch"
-          echo "Requested branch is ${RELEASE_BRANCH}"
-          echo "Child source version is ${SOURCE_VERSION}"
+          echo "Requested=${RELEASE_BRANCH}"
+          echo "Actual=${SOURCE_VERSION}"
           exit 1
         fi
 
         if ! [[ "${RELEASE_COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
-          echo "ERROR - Child resolved source version is not a full Git commit"
-          echo "Resolved source version is ${RELEASE_COMMIT}"
+          echo "ERROR - Resolved source version is not a full Git commit"
+          echo "Value=${RELEASE_COMMIT}"
           exit 1
         fi
 
         RELEASE_BRANCH_KEY="$(
           printf '%s' "${RELEASE_BRANCH}" |
-          tr '/' '-'
+          sed 's#[^A-Za-z0-9._-]#-#g'
         )"
-
-        if [ -z "${RELEASE_BRANCH_KEY}" ]; then
-          echo "ERROR - Unable to create release branch key"
-          exit 1
-        fi
 
         SHORT_COMMIT="${RELEASE_COMMIT:0:8}"
 
         RELEASE_PREFIX="releases/${RELEASE_BRANCH_KEY}/${SHORT_COMMIT}"
 
-        echo "RELEASE_BRANCH=${RELEASE_BRANCH}"
-        echo "SOURCE_VERSION=${SOURCE_VERSION}"
-        echo "RELEASE_COMMIT=${RELEASE_COMMIT}"
-        echo "RELEASE_PREFIX=${RELEASE_PREFIX}"
-
         jq -n \
           --arg release_branch "${RELEASE_BRANCH}" \
-          --arg release_branch_key "${RELEASE_BRANCH_KEY}" \
           --arg environment "${ENVIRONMENT}" \
           --arg release_commit "${RELEASE_COMMIT}" \
           --arg release_prefix "${RELEASE_PREFIX}" \
           --arg generate_build_id "${BUILD_ID}" \
           '{
             release_branch: $release_branch,
-            release_branch_key: $release_branch_key,
             environment: $environment,
             release_commit: $release_commit,
             release_prefix: $release_prefix,
@@ -271,28 +247,17 @@ phases:
             /tmp/generated-release.json
         )"
 
-        RELEASE_COMMIT="$(
-          jq -r \
-            '.release_commit' \
-            /tmp/generated-release.json
-        )"
-
-        echo "Release location:"
-        echo "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/"
-
         for object_key in \
           "${RELEASE_PREFIX}/manifest.json" \
           "${RELEASE_PREFIX}/desired/desired-schema.zip" \
           "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256"
         do
-
           aws s3api head-object \
             --bucket "${RELEASE_BUCKET}" \
             --key "${object_key}" \
             >/dev/null
 
           echo "Verified s3://${RELEASE_BUCKET}/${object_key}"
-
         done
 
         aws s3 cp \
@@ -306,8 +271,6 @@ phases:
         aws s3 cp \
           "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/desired/desired-schema.zip.sha256" \
           /tmp/desired-schema.zip.sha256
-
-        echo "Release-level artifacts downloaded"
 
 
       - |
@@ -377,7 +340,7 @@ phases:
 
         if [ "${MANIFEST_COMMIT}" != "${RELEASE_COMMIT}" ]; then
           echo "ERROR - Manifest commit mismatch"
-          echo "Child build=${RELEASE_COMMIT}"
+          echo "Child=${RELEASE_COMMIT}"
           echo "Manifest=${MANIFEST_COMMIT}"
           exit 1
         fi
@@ -410,7 +373,7 @@ phases:
         )"
 
         if [ -z "${CONFIG_FILE}" ]; then
-          echo "ERROR - database-config.json not found in desired schema bundle"
+          echo "ERROR - database-config.json not found in desired bundle"
           exit 1
         fi
 
@@ -419,7 +382,7 @@ phases:
           "${CONFIG_FILE}" \
           >/dev/null
         then
-          echo "ERROR - Database configuration in desired bundle is invalid"
+          echo "ERROR - Release database configuration is invalid"
           exit 1
         fi
 
@@ -451,7 +414,6 @@ phases:
 
         while IFS= read -r DATABASE
         do
-
           if [ -z "${DATABASE}" ]; then
             continue
           fi
@@ -460,9 +422,8 @@ phases:
 
           while IFS= read -r SCHEMA
           do
-
             if [ -z "${SCHEMA}" ]; then
-              echo "ERROR - Empty schema in release database configuration"
+              echo "ERROR - Empty schema in release configuration"
               exit 1
             fi
 
@@ -478,7 +439,6 @@ phases:
               "rollback/${DATABASE}/${SCHEMA}/rollback.sql" \
               "rollback/${DATABASE}/${SCHEMA}/rollback.sql.sha256"
             do
-
               OBJECT_KEY="${RELEASE_PREFIX}/${ENVIRONMENT}/${relative_object}"
 
               aws s3api head-object \
@@ -489,7 +449,6 @@ phases:
               OBJECT_COUNT=$((OBJECT_COUNT + 1))
 
               echo "Verified s3://${RELEASE_BUCKET}/${OBJECT_KEY}"
-
             done
 
           done < <(
@@ -524,6 +483,12 @@ phases:
           exit 1
         fi
 
+        printf '%s\n' "${DATABASE_COUNT}" \
+          > /tmp/database-count
+
+        printf '%s\n' "${SCHEMA_COUNT}" \
+          > /tmp/schema-count
+
         echo "Complete database release verified"
         echo "Database count=${DATABASE_COUNT}"
         echo "Schema count=${SCHEMA_COUNT}"
@@ -549,10 +514,8 @@ phases:
 
         while IFS= read -r DATABASE
         do
-
           while IFS= read -r SCHEMA
           do
-
             VERIFY_DIR="/tmp/sql-artifact-verification/${DATABASE}/${SCHEMA}"
 
             mkdir -p "${VERIFY_DIR}"
@@ -562,26 +525,20 @@ phases:
               forward \
               rollback
             do
-
               case "${artifact_type}" in
-
                 baseline)
                   SQL_NAME="schema.sql"
                   ;;
-
                 forward)
                   SQL_NAME="migration.sql"
                   ;;
-
                 rollback)
                   SQL_NAME="rollback.sql"
                   ;;
-
                 *)
                   echo "ERROR - Unexpected artifact type ${artifact_type}"
                   exit 1
                   ;;
-
               esac
 
               BASE_URI="s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/${ENVIRONMENT}/${artifact_type}/${DATABASE}/${SCHEMA}"
@@ -622,7 +579,6 @@ phases:
               fi
 
               echo "Checksum verified for ${artifact_type} ${DATABASE}.${SCHEMA}"
-
             done
 
           done < <(
@@ -648,21 +604,15 @@ phases:
         echo "CREATE PENDING DATABASE RELEASE POINTER"
         echo "========================================"
 
-        RELEASE_PREFIX="$(
-          jq -r \
-            '.release_prefix' \
-            /tmp/generated-release.json
-        )"
-
         RELEASE_COMMIT="$(
           jq -r \
             '.release_commit' \
             /tmp/generated-release.json
         )"
 
-        RELEASE_BRANCH_KEY="$(
+        RELEASE_PREFIX="$(
           jq -r \
-            '.release_branch_key' \
+            '.release_prefix' \
             /tmp/generated-release.json
         )"
 
@@ -673,20 +623,29 @@ phases:
         )"
 
         DATABASE_COUNT="$(
-          jq \
-            'keys | length' \
-            /tmp/release-database-config.json
+          cat /tmp/database-count
         )"
 
         SCHEMA_COUNT="$(
-          jq \
-            '[.[] | length] | add' \
-            /tmp/release-database-config.json
+          cat /tmp/schema-count
         )"
+
+        if ! [[ "${DATABASE_COUNT}" =~ ^[0-9]+$ ]] || \
+           [ "${DATABASE_COUNT}" -eq 0 ]
+        then
+          echo "ERROR - Invalid database count"
+          exit 1
+        fi
+
+        if ! [[ "${SCHEMA_COUNT}" =~ ^[0-9]+$ ]] || \
+           [ "${SCHEMA_COUNT}" -eq 0 ]
+        then
+          echo "ERROR - Invalid schema count"
+          exit 1
+        fi
 
         jq -n \
           --arg release_branch "${RELEASE_BRANCH}" \
-          --arg release_branch_key "${RELEASE_BRANCH_KEY}" \
           --arg environment "${ENVIRONMENT}" \
           --arg release_commit "${RELEASE_COMMIT}" \
           --arg release_prefix "${RELEASE_PREFIX}" \
@@ -695,7 +654,6 @@ phases:
           --argjson schema_count "${SCHEMA_COUNT}" \
           '{
             release_branch: $release_branch,
-            release_branch_key: $release_branch_key,
             environment: $environment,
             release_commit: $release_commit,
             release_prefix: $release_prefix,
@@ -705,6 +663,19 @@ phases:
             release_complete: true
           }' \
           > /tmp/pending-release.json
+
+        if ! jq -e \
+          '.release_complete == true
+           and
+           (.database_count > 0)
+           and
+           (.schema_count > 0)' \
+          /tmp/pending-release.json \
+          >/dev/null
+        then
+          echo "ERROR - Pending release metadata is incomplete"
+          exit 1
+        fi
 
         echo "Pending release metadata:"
 
@@ -718,29 +689,26 @@ phases:
         echo "PUBLISH PENDING DATABASE RELEASE POINTER"
         echo "========================================"
 
-        PIPELINE_EXECUTION_ID="${CODEBUILD_INITIATOR#codepipeline/}"
-
-        if [ -z "${PIPELINE_EXECUTION_ID}" ] || \
-           [ "${PIPELINE_EXECUTION_ID}" = "${CODEBUILD_INITIATOR}" ]
-        then
-          echo "WARNING - Unable to derive pipeline execution ID"
-          echo "Publishing environment current pointer only"
-
-        else
-
-          aws s3 cp \
-            /tmp/pending-release.json \
-            "s3://${RELEASE_BUCKET}/pending-release/${ENVIRONMENT}/executions/${PIPELINE_EXECUTION_ID}.json"
-
-          echo "Execution-specific pending pointer published"
-
-        fi
+        PENDING_KEY="pending-release/${ENVIRONMENT}/current.json"
 
         aws s3 cp \
           /tmp/pending-release.json \
-          "s3://${RELEASE_BUCKET}/pending-release/${ENVIRONMENT}/current.json"
+          "s3://${RELEASE_BUCKET}/${PENDING_KEY}"
 
-        echo "Current pending release pointer published"
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${PENDING_KEY}" \
+          /tmp/verify-pending-release.json
+
+        if ! cmp -s \
+          /tmp/pending-release.json \
+          /tmp/verify-pending-release.json
+        then
+          echo "ERROR - Published pending pointer verification failed"
+          exit 1
+        fi
+
+        echo "Current pending release pointer published and verified:"
+        echo "s3://${RELEASE_BUCKET}/${PENDING_KEY}"
 
 
       - |
@@ -751,13 +719,12 @@ phases:
         echo "Release branch:"
         echo "${RELEASE_BRANCH}"
 
-        echo "Environment:"
+        echo "Plan environment:"
         echo "${ENVIRONMENT}"
 
-        echo "Release:"
-        jq -r \
-          '.release_prefix' \
-          /tmp/pending-release.json
+        echo "Pending release:"
+
+        cat /tmp/pending-release.json
 
         echo "Baseline, forward migration, rollback,"
         echo "and all checksums were verified."
