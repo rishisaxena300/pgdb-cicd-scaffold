@@ -16,17 +16,20 @@ phases:
         echo "PUBLISH APPROVED DATABASE RELEASE"
         echo "========================================"
 
-        for variable in \
-          RELEASE_BUCKET \
-          ENVIRONMENT
-        do
+        if [ -z "${RELEASE_BUCKET:-}" ]; then
+          echo "ERROR - RELEASE_BUCKET is required"
+          exit 1
+        fi
 
-          if [ -z "${!variable:-}" ]; then
-            echo "ERROR - ${variable} is required"
-            exit 1
-          fi
+        if [ -z "${ENVIRONMENT:-}" ]; then
+          echo "ERROR - ENVIRONMENT is required"
+          exit 1
+        fi
 
-        done
+        if [ "${ENVIRONMENT}" = "placeholder" ]; then
+          echo "ERROR - ENVIRONMENT was not overridden"
+          exit 1
+        fi
 
         ENVIRONMENT="$(
           printf '%s' "${ENVIRONMENT}" |
@@ -57,7 +60,7 @@ phases:
         set -euo pipefail
 
         echo "========================================"
-        echo "GET PENDING RELEASE"
+        echo "DOWNLOAD PENDING RELEASE"
         echo "========================================"
 
         PENDING_KEY="pending-release/${ENVIRONMENT}/current.json"
@@ -122,18 +125,6 @@ phases:
             /tmp/pending-release.json
         )"
 
-        DATABASE_COUNT="$(
-          jq -r \
-            '.database_count // 0' \
-            /tmp/pending-release.json
-        )"
-
-        SCHEMA_COUNT="$(
-          jq -r \
-            '.schema_count // 0' \
-            /tmp/pending-release.json
-        )"
-
         if [ -z "${RELEASE_BRANCH}" ]; then
           echo "ERROR - release_branch is missing"
           exit 1
@@ -156,8 +147,8 @@ phases:
 
         if [ "${RELEASE_ENVIRONMENT}" != "${ENVIRONMENT}" ]; then
           echo "ERROR - Pending release environment mismatch"
-          echo "Pipeline=${ENVIRONMENT}"
-          echo "Release=${RELEASE_ENVIRONMENT}"
+          echo "Pipeline environment=${ENVIRONMENT}"
+          echo "Release environment=${RELEASE_ENVIRONMENT}"
           exit 1
         fi
 
@@ -166,18 +157,21 @@ phases:
           exit 1
         fi
 
+        export RELEASE_BRANCH
+        export RELEASE_BRANCH_KEY
+        export RELEASE_COMMIT
+        export RELEASE_PREFIX
+
         echo "Release branch=${RELEASE_BRANCH}"
         echo "Release commit=${RELEASE_COMMIT}"
         echo "Release prefix=${RELEASE_PREFIX}"
-        echo "Databases=${DATABASE_COUNT}"
-        echo "Schemas=${SCHEMA_COUNT}"
 
 
       - |
         set -euo pipefail
 
         echo "========================================"
-        echo "VERIFY IMMUTABLE RELEASE EXISTS"
+        echo "VERIFY IMMUTABLE RELEASE"
         echo "========================================"
 
         for object_key in \
@@ -267,7 +261,7 @@ phases:
         set -euo pipefail
 
         echo "========================================"
-        echo "PUBLISH APPROVED RELEASE POINTER"
+        echo "PUBLISH APPROVED RELEASE"
         echo "========================================"
 
         APPROVED_KEY="approved-release/${ENVIRONMENT}/current.json"
@@ -284,7 +278,7 @@ phases:
         set -euo pipefail
 
         echo "========================================"
-        echo "VERIFY APPROVED RELEASE POINTER"
+        echo "VERIFY APPROVED RELEASE"
         echo "========================================"
 
         aws s3 cp \
@@ -295,22 +289,22 @@ phases:
           /tmp/approved-release.json \
           /tmp/verify-approved-release.json
         then
-          echo "ERROR - Approved release pointer verification failed"
+          echo "ERROR - Approved release verification failed"
           exit 1
         fi
 
-        APPROVED_FLAG="$(
+        APPROVED="$(
           jq -r \
             '.approved // false' \
             /tmp/verify-approved-release.json
         )"
 
-        if [ "${APPROVED_FLAG}" != "true" ]; then
-          echo "ERROR - Approved release pointer is not marked approved"
+        if [ "${APPROVED}" != "true" ]; then
+          echo "ERROR - Release is not marked approved"
           exit 1
         fi
 
-        echo "Approved release pointer verified"
+        echo "Approved release verified"
 
 
       - |
