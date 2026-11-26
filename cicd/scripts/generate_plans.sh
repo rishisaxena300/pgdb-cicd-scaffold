@@ -32,68 +32,41 @@ then
 fi
 
 
-if [ -z "${ENVIRONMENT:-}" ]; then
-  echo "ERROR - ENVIRONMENT is required"
-  exit 1
-fi
+for required_variable in \
+  ENVIRONMENT \
+  RELEASE_BUCKET \
+  PGHOST \
+  PGPORT \
+  PGUSER \
+  PGPASSWORD
+do
 
+  if [ -z "${!required_variable:-}" ]; then
+    echo "ERROR - ${required_variable} is required"
+    exit 1
+  fi
 
-if [ -z "${RELEASE_BUCKET:-}" ]; then
-  echo "ERROR - RELEASE_BUCKET is required"
-  exit 1
-fi
-
-
-if [ -z "${PGHOST:-}" ]; then
-  echo "ERROR - PGHOST is required"
-  exit 1
-fi
-
-
-if [ -z "${PGPORT:-}" ]; then
-  echo "ERROR - PGPORT is required"
-  exit 1
-fi
-
-
-if [ -z "${PGUSER:-}" ]; then
-  echo "ERROR - PGUSER is required"
-  exit 1
-fi
-
-
-if [ -z "${PGPASSWORD:-}" ]; then
-  echo "ERROR - PGPASSWORD is required"
-  exit 1
-fi
+done
 
 
 # ----------------------------------------------------------
 # Validate release files created by create_release.sh
 # ----------------------------------------------------------
 
-if [ ! -f "output/release-prefix.txt" ]; then
-  echo "ERROR - output/release-prefix.txt does not exist"
-  exit 1
-fi
+for required_file in \
+  output/release-prefix.txt \
+  output/manifest.json \
+  output/desired/desired-schema.zip \
+  output/desired/desired-schema.zip.sha256
+do
 
+  if [ ! -f "${required_file}" ]; then
+    echo "ERROR - Required release file does not exist"
+    echo "${required_file}"
+    exit 1
+  fi
 
-if [ ! -f "output/manifest.json" ]; then
-  echo "ERROR - output/manifest.json does not exist"
-  exit 1
-fi
-
-
-if [ ! -f "output/desired/desired-schema.zip" ]; then
-  echo "ERROR - output/desired/desired-schema.zip does not exist"
-  exit 1
-fi
-
-
-if [ ! -f "output/desired/desired-schema.zip.sha256" ]; then
-  echo "ERROR - output/desired/desired-schema.zip.sha256 does not exist"
-  exit 1
-fi
+done
 
 
 RELEASE_PREFIX="$(
@@ -118,9 +91,6 @@ echo "Release location is ${S3_RELEASE_URI}"
 
 # ----------------------------------------------------------
 # Temporary workspace
-#
-# pg-schema-diff needs a complete DDL representation,
-# including CREATE SCHEMA.
 # ----------------------------------------------------------
 
 TEMP_ROOT="$(
@@ -140,16 +110,12 @@ trap cleanup EXIT
 echo "Temporary pg-schema-diff workspace is ${TEMP_ROOT}"
 
 
-# ----------------------------------------------------------
-# Counters used for final verification
-# ----------------------------------------------------------
-
 DATABASE_COUNT=0
 SCHEMA_TOTAL=0
 
 
 # ----------------------------------------------------------
-# Read every configured database
+# Process every configured database
 # ----------------------------------------------------------
 
 while IFS= read -r DATABASE
@@ -168,10 +134,6 @@ do
   echo "========================================"
 
 
-  # --------------------------------------------------------
-  # Validate database identifier
-  # --------------------------------------------------------
-
   if ! [[ "${DATABASE}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
     echo "ERROR - Unsupported database identifier '${DATABASE}'"
     exit 1
@@ -187,19 +149,19 @@ do
 
 
   if ! [[ "${SCHEMA_COUNT}" =~ ^[0-9]+$ ]]; then
-    echo "ERROR - Invalid schema configuration for database ${DATABASE}"
+    echo "ERROR - Invalid schema configuration for ${DATABASE}"
     exit 1
   fi
 
 
   if [ "${SCHEMA_COUNT}" -eq 0 ]; then
-    echo "ERROR - No schemas configured for database ${DATABASE}"
+    echo "ERROR - No schemas configured for ${DATABASE}"
     exit 1
   fi
 
 
   # --------------------------------------------------------
-  # Test connectivity once per database
+  # Test database connectivity
   # --------------------------------------------------------
 
   echo "========================================"
@@ -219,12 +181,7 @@ do
   echo "Database connectivity successful"
 
 
-  # --------------------------------------------------------
-  # Build database DSN
-  #
-  # Do not enable shell tracing.
-  # This value contains the PLAN database password.
-  # --------------------------------------------------------
+  # Do not enable shell tracing. This contains the password.
 
   DB_DSN="postgres://${PGUSER}:${PGPASSWORD}@${PGHOST}:${PGPORT}/${DATABASE}"
 
@@ -237,7 +194,7 @@ do
   do
 
     if [ -z "${SCHEMA}" ]; then
-      echo "ERROR - Empty schema configured for database ${DATABASE}"
+      echo "ERROR - Empty schema configured for ${DATABASE}"
       exit 1
     fi
 
@@ -255,10 +212,6 @@ do
     echo "Schema is '${SCHEMA}'"
 
 
-    # ------------------------------------------------------
-    # Validate schema identifier
-    # ------------------------------------------------------
-
     if ! [[ "${SCHEMA}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
       echo "ERROR - Unsupported schema identifier '${SCHEMA}'"
       exit 1
@@ -266,7 +219,7 @@ do
 
 
     # ------------------------------------------------------
-    # Locate repository desired-state directory
+    # Validate repository desired state
     # ------------------------------------------------------
 
     REPOSITORY_DESIRED_DIR="Aurora-PostgreSQL-DB/${DATABASE}/${SCHEMA}"
@@ -277,13 +230,13 @@ do
     echo "========================================"
 
 
-    echo "Repository desired-state directory is:"
+    echo "Repository desired-state directory:"
     echo "${REPOSITORY_DESIRED_DIR}"
 
 
     if [ ! -d "${REPOSITORY_DESIRED_DIR}" ]; then
       echo "ERROR - Desired-state directory does not exist"
-      echo "Expected directory is ${REPOSITORY_DESIRED_DIR}"
+      echo "${REPOSITORY_DESIRED_DIR}"
       exit 1
     fi
 
@@ -298,7 +251,7 @@ do
 
     if [ "${DESIRED_SQL_COUNT}" -eq 0 ]; then
       echo "ERROR - No SQL files found in desired-state directory"
-      echo "Directory is ${REPOSITORY_DESIRED_DIR}"
+      echo "${REPOSITORY_DESIRED_DIR}"
       exit 1
     fi
 
@@ -307,10 +260,7 @@ do
 
 
     # ------------------------------------------------------
-    # Build complete desired-state input
-    #
-    # Git contains object DDL but does not need schema.sql.
-    # The build adds 000_schema.sql temporarily.
+    # Prepare complete desired-state input
     # ------------------------------------------------------
 
     TEMP_DESIRED_DIR="${TEMP_ROOT}/desired/${DATABASE}/${SCHEMA}"
@@ -355,17 +305,14 @@ do
 
 
     # ------------------------------------------------------
-    # Output directories
+    # Prepare output directories
     # ------------------------------------------------------
 
     BASE_DIR="output/${ENVIRONMENT}"
 
     BASELINE_DIR="${BASE_DIR}/baseline/${DATABASE}/${SCHEMA}"
-
     FORWARD_DIR="${BASE_DIR}/forward/${DATABASE}/${SCHEMA}"
-
     ROLLBACK_DIR="${BASE_DIR}/rollback/${DATABASE}/${SCHEMA}"
-
     REVIEW_DIR="${BASE_DIR}/review/${DATABASE}/${SCHEMA}"
 
 
@@ -413,7 +360,7 @@ do
 
     if [ "${SCHEMA_EXISTS}" != "t" ]; then
 
-      echo "ERROR - Schema '${SCHEMA}' does not exist in database '${DATABASE}'"
+      echo "ERROR - Schema '${SCHEMA}' does not exist in '${DATABASE}'"
 
       echo "Schemas visible to ${PGUSER}:"
 
@@ -438,12 +385,10 @@ do
 
 
     # ------------------------------------------------------
-    # Capture current/live schema
+    # Capture original current/live schema
     #
-    # This is the starting state for:
-    # - drift validation
-    # - forward migration
-    # - rollback generation
+    # This file is retained exactly as produced by pg_dump.
+    # It may contain psql meta-commands such as \restrict.
     # ------------------------------------------------------
 
     echo "========================================"
@@ -452,9 +397,7 @@ do
 
 
     BASELINE_FILE="${BASELINE_DIR}/schema.sql"
-
     BASELINE_HASH_FILE="${BASELINE_FILE}.sha256"
-
 
     SCHEMA_PATTERN="\"${SCHEMA}\""
 
@@ -487,7 +430,7 @@ do
 
 
     # ------------------------------------------------------
-    # Hash baseline
+    # Hash original baseline
     # ------------------------------------------------------
 
     echo "========================================"
@@ -499,8 +442,8 @@ do
       cd "${BASELINE_DIR}"
 
       sha256sum \
-        "schema.sql" \
-        > "schema.sql.sha256"
+        schema.sql \
+        > schema.sql.sha256
     )
 
 
@@ -509,7 +452,7 @@ do
 
       sha256sum \
         --check \
-        "schema.sql.sha256"
+        schema.sql.sha256
     )
     then
       echo "ERROR - Baseline checksum verification failed"
@@ -539,7 +482,6 @@ do
 
 
     FORWARD_FILE="${FORWARD_DIR}/migration.sql"
-
     FORWARD_HASH_FILE="${FORWARD_FILE}.sha256"
 
 
@@ -569,8 +511,8 @@ do
       cd "${FORWARD_DIR}"
 
       sha256sum \
-        "migration.sql" \
-        > "migration.sql.sha256"
+        migration.sql \
+        > migration.sql.sha256
     )
 
 
@@ -579,7 +521,7 @@ do
 
       sha256sum \
         --check \
-        "migration.sql.sha256"
+        migration.sql.sha256
     )
     then
       echo "ERROR - Forward migration checksum verification failed"
@@ -603,26 +545,37 @@ do
 
 
     if [ -s "${FORWARD_FILE}" ]; then
-
       echo "Database schema changes were detected"
       echo "Migration file is ${FORWARD_FILE}"
-
     else
-
       echo "No forward database schema changes were detected"
-
     fi
 
 
     # ------------------------------------------------------
-    # Prepare captured baseline as rollback target
+    # Prepare normalized baseline for rollback planning
     #
-    # The baseline directory already contains schema.sql.
-    # The .sha256 file is ignored because pg-schema-diff
-    # reads SQL files as DDL schema sources.
+    # PostgreSQL 17 plain pg_dump output can contain:
+    #
+    #   \restrict ...
+    #   \unrestrict ...
+    #
+    # Those are psql meta-commands, not SQL statements.
+    # pg-schema-diff directory sources execute SQL directly,
+    # so these commands must be removed from the temporary
+    # rollback input.
+    #
+    # The original baseline/schema.sql remains unchanged.
     # ------------------------------------------------------
 
+    echo "========================================"
+    echo "PREPARE NORMALIZED ROLLBACK BASELINE"
+    echo "========================================"
+
+
     TEMP_BASELINE_DIR="${TEMP_ROOT}/baseline/${DATABASE}/${SCHEMA}"
+
+    NORMALIZED_BASELINE_FILE="${TEMP_BASELINE_DIR}/schema.sql"
 
 
     rm -rf "${TEMP_BASELINE_DIR}"
@@ -630,24 +583,82 @@ do
     mkdir -p "${TEMP_BASELINE_DIR}"
 
 
-    cp \
+    sed \
+      -e '/^[[:space:]]*\\restrict\([[:space:]].*\)\{0,1\}[[:space:]]*$/d' \
+      -e '/^[[:space:]]*\\unrestrict\([[:space:]].*\)\{0,1\}[[:space:]]*$/d' \
       "${BASELINE_FILE}" \
-      "${TEMP_BASELINE_DIR}/schema.sql"
+      > "${NORMALIZED_BASELINE_FILE}"
 
 
-    if [ ! -s "${TEMP_BASELINE_DIR}/schema.sql" ]; then
-      echo "ERROR - Temporary rollback baseline is empty"
+    if [ ! -s "${NORMALIZED_BASELINE_FILE}" ]; then
+      echo "ERROR - Normalized rollback baseline is empty"
       exit 1
     fi
 
 
-    echo "========================================"
-    echo "PREPARE ROLLBACK TARGET"
-    echo "========================================"
+    echo "Original baseline:"
+    echo "${BASELINE_FILE}"
+
+    echo "Normalized rollback baseline:"
+    echo "${NORMALIZED_BASELINE_FILE}"
 
 
-    echo "Rollback target baseline is:"
-    echo "${TEMP_BASELINE_DIR}/schema.sql"
+    ORIGINAL_RESTRICT_COUNT="$(
+      grep \
+        -cE \
+        '^[[:space:]]*\\(un)?restrict([[:space:]]|$)' \
+        "${BASELINE_FILE}" \
+        || true
+    )"
+
+
+    NORMALIZED_RESTRICT_COUNT="$(
+      grep \
+        -cE \
+        '^[[:space:]]*\\(un)?restrict([[:space:]]|$)' \
+        "${NORMALIZED_BASELINE_FILE}" \
+        || true
+    )"
+
+
+    echo "Removed restrict/unrestrict command count:"
+    echo "${ORIGINAL_RESTRICT_COUNT}"
+
+
+    if [ "${NORMALIZED_RESTRICT_COUNT}" -ne 0 ]; then
+      echo "ERROR - restrict/unrestrict commands remain after normalization"
+
+      grep \
+        -nE \
+        '^[[:space:]]*\\(un)?restrict([[:space:]]|$)' \
+        "${NORMALIZED_BASELINE_FILE}" \
+        || true
+
+      exit 1
+    fi
+
+
+    REMAINING_META_COMMANDS="$(
+      grep \
+        -nE \
+        '^[[:space:]]*\\' \
+        "${NORMALIZED_BASELINE_FILE}" \
+        || true
+    )"
+
+
+    if [ -n "${REMAINING_META_COMMANDS}" ]; then
+
+      echo "ERROR - Baseline contains unsupported psql meta-commands"
+      echo "pg-schema-diff cannot execute these as SQL:"
+      echo "${REMAINING_META_COMMANDS}"
+
+      exit 1
+
+    fi
+
+
+    echo "Normalized rollback baseline contains SQL DDL only"
 
 
     # ------------------------------------------------------
@@ -655,9 +666,6 @@ do
     #
     # FROM: Desired Git schema
     # TO:   Captured pre-deployment baseline
-    #
-    # Both sides are DDL directories, so pg-schema-diff
-    # needs --temp-db-dsn for temporary schema extraction.
     # ------------------------------------------------------
 
     echo "========================================"
@@ -666,7 +674,6 @@ do
 
 
     ROLLBACK_FILE="${ROLLBACK_DIR}/rollback.sql"
-
     ROLLBACK_HASH_FILE="${ROLLBACK_FILE}.sha256"
 
 
@@ -697,8 +704,8 @@ do
       cd "${ROLLBACK_DIR}"
 
       sha256sum \
-        "rollback.sql" \
-        > "rollback.sql.sha256"
+        rollback.sql \
+        > rollback.sql.sha256
     )
 
 
@@ -707,7 +714,7 @@ do
 
       sha256sum \
         --check \
-        "rollback.sql.sha256"
+        rollback.sql.sha256
     )
     then
       echo "ERROR - Rollback migration checksum verification failed"
@@ -731,14 +738,10 @@ do
 
 
     if [ -s "${ROLLBACK_FILE}" ]; then
-
       echo "Rollback SQL was generated"
       echo "Rollback migration file is ${ROLLBACK_FILE}"
-
     else
-
       echo "No rollback SQL is required"
-
     fi
 
 
@@ -793,6 +796,10 @@ done < <(
 )
 
 
+# ----------------------------------------------------------
+# Validate processing counts
+# ----------------------------------------------------------
+
 if [ "${DATABASE_COUNT}" -eq 0 ]; then
   echo "ERROR - No databases were processed"
   exit 1
@@ -813,7 +820,6 @@ echo "========================================"
 echo "Database count is ${DATABASE_COUNT}"
 echo "Schema count is ${SCHEMA_TOTAL}"
 
-
 echo "Generated plan files:"
 
 
@@ -824,10 +830,7 @@ sort
 
 
 # ----------------------------------------------------------
-# Verify all configured local artifacts before S3 upload
-#
-# Nothing is uploaded until all configured schemas have
-# successfully generated baseline, forward, and rollback.
+# Verify all local artifacts before S3 upload
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -842,6 +845,7 @@ do
   do
 
     LOCAL_SCHEMA_ROOT="output/${ENVIRONMENT}"
+
 
     for required_file in \
       "${LOCAL_SCHEMA_ROOT}/baseline/${DATABASE}/${SCHEMA}/schema.sql" \
@@ -880,7 +884,7 @@ done < <(
 
 
 # ----------------------------------------------------------
-# Upload desired schema once per release
+# Upload desired schema
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -899,7 +903,7 @@ aws s3 cp \
 
 
 # ----------------------------------------------------------
-# Upload manifest once per release
+# Upload manifest
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -913,9 +917,7 @@ aws s3 cp \
 
 
 # ----------------------------------------------------------
-# Upload all environment artifacts
-#
-# This uploads baseline, forward, rollback, and checksums.
+# Upload baseline, forward, rollback and checksums
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -930,7 +932,7 @@ aws s3 cp \
 
 
 # ----------------------------------------------------------
-# Verify all required S3 objects
+# Verify release-level S3 artifacts
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -938,23 +940,25 @@ echo "VERIFY S3 RELEASE ARTIFACTS"
 echo "========================================"
 
 
-aws s3api head-object \
-  --bucket "${RELEASE_BUCKET}" \
-  --key "${RELEASE_PREFIX}/manifest.json" \
-  >/dev/null
+for release_object in \
+  "${RELEASE_PREFIX}/manifest.json" \
+  "${RELEASE_PREFIX}/desired/desired-schema.zip" \
+  "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256"
+do
+
+  aws s3api head-object \
+    --bucket "${RELEASE_BUCKET}" \
+    --key "${release_object}" \
+    >/dev/null
+
+  echo "Verified s3://${RELEASE_BUCKET}/${release_object}"
+
+done
 
 
-aws s3api head-object \
-  --bucket "${RELEASE_BUCKET}" \
-  --key "${RELEASE_PREFIX}/desired/desired-schema.zip" \
-  >/dev/null
-
-
-aws s3api head-object \
-  --bucket "${RELEASE_BUCKET}" \
-  --key "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256" \
-  >/dev/null
-
+# ----------------------------------------------------------
+# Verify every database/schema S3 artifact
+# ----------------------------------------------------------
 
 while IFS= read -r DATABASE
 do
@@ -1005,10 +1009,6 @@ aws s3 ls \
   "${S3_RELEASE_URI}/" \
   --recursive
 
-
-# ----------------------------------------------------------
-# Complete
-# ----------------------------------------------------------
 
 echo "========================================"
 echo "DATABASE PLAN GENERATION SUCCESSFUL"
