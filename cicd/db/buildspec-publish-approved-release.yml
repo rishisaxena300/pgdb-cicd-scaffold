@@ -1,0 +1,331 @@
+version: 0.2
+
+env:
+  shell: bash
+
+phases:
+
+  build:
+
+    commands:
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "PUBLISH APPROVED DATABASE RELEASE"
+        echo "========================================"
+
+        for variable in \
+          RELEASE_BUCKET \
+          ENVIRONMENT
+        do
+
+          if [ -z "${!variable:-}" ]; then
+            echo "ERROR - ${variable} is required"
+            exit 1
+          fi
+
+        done
+
+        ENVIRONMENT="$(
+          printf '%s' "${ENVIRONMENT}" |
+          xargs |
+          tr '[:lower:]' '[:upper:]'
+        )"
+
+        export ENVIRONMENT
+
+        case "${ENVIRONMENT}" in
+
+          T1|T2)
+            ;;
+
+          *)
+            echo "ERROR - ENVIRONMENT must be T1 or T2"
+            echo "Received value is '${ENVIRONMENT}'"
+            exit 1
+            ;;
+
+        esac
+
+        echo "Environment=${ENVIRONMENT}"
+        echo "Release bucket=${RELEASE_BUCKET}"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "GET PENDING RELEASE"
+        echo "========================================"
+
+        PENDING_KEY="pending-release/${ENVIRONMENT}/current.json"
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${PENDING_KEY}" \
+          /tmp/pending-release.json
+
+        if ! jq -e . \
+          /tmp/pending-release.json \
+          >/dev/null
+        then
+          echo "ERROR - Pending release JSON is invalid"
+          exit 1
+        fi
+
+        echo "Pending release:"
+
+        cat /tmp/pending-release.json
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VALIDATE PENDING RELEASE"
+        echo "========================================"
+
+        RELEASE_BRANCH="$(
+          jq -r \
+            '.release_branch // empty' \
+            /tmp/pending-release.json
+        )"
+
+        RELEASE_BRANCH_KEY="$(
+          jq -r \
+            '.release_branch_key // empty' \
+            /tmp/pending-release.json
+        )"
+
+        RELEASE_COMMIT="$(
+          jq -r \
+            '.release_commit // empty' \
+            /tmp/pending-release.json
+        )"
+
+        RELEASE_PREFIX="$(
+          jq -r \
+            '.release_prefix // empty' \
+            /tmp/pending-release.json
+        )"
+
+        RELEASE_ENVIRONMENT="$(
+          jq -r \
+            '.environment // empty' \
+            /tmp/pending-release.json
+        )"
+
+        RELEASE_COMPLETE="$(
+          jq -r \
+            '.release_complete // false' \
+            /tmp/pending-release.json
+        )"
+
+        DATABASE_COUNT="$(
+          jq -r \
+            '.database_count // 0' \
+            /tmp/pending-release.json
+        )"
+
+        SCHEMA_COUNT="$(
+          jq -r \
+            '.schema_count // 0' \
+            /tmp/pending-release.json
+        )"
+
+        if [ -z "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - release_branch is missing"
+          exit 1
+        fi
+
+        if [ -z "${RELEASE_BRANCH_KEY}" ]; then
+          echo "ERROR - release_branch_key is missing"
+          exit 1
+        fi
+
+        if [ -z "${RELEASE_COMMIT}" ]; then
+          echo "ERROR - release_commit is missing"
+          exit 1
+        fi
+
+        if [ -z "${RELEASE_PREFIX}" ]; then
+          echo "ERROR - release_prefix is missing"
+          exit 1
+        fi
+
+        if [ "${RELEASE_ENVIRONMENT}" != "${ENVIRONMENT}" ]; then
+          echo "ERROR - Pending release environment mismatch"
+          echo "Pipeline=${ENVIRONMENT}"
+          echo "Release=${RELEASE_ENVIRONMENT}"
+          exit 1
+        fi
+
+        if [ "${RELEASE_COMPLETE}" != "true" ]; then
+          echo "ERROR - Pending release is not complete"
+          exit 1
+        fi
+
+        echo "Release branch=${RELEASE_BRANCH}"
+        echo "Release commit=${RELEASE_COMMIT}"
+        echo "Release prefix=${RELEASE_PREFIX}"
+        echo "Databases=${DATABASE_COUNT}"
+        echo "Schemas=${SCHEMA_COUNT}"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VERIFY IMMUTABLE RELEASE EXISTS"
+        echo "========================================"
+
+        for object_key in \
+          "${RELEASE_PREFIX}/manifest.json" \
+          "${RELEASE_PREFIX}/desired/desired-schema.zip" \
+          "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256"
+        do
+
+          aws s3api head-object \
+            --bucket "${RELEASE_BUCKET}" \
+            --key "${object_key}" \
+            >/dev/null
+
+          echo "Verified ${object_key}"
+
+        done
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VERIFY RELEASE MANIFEST"
+        echo "========================================"
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/manifest.json" \
+          /tmp/release-manifest.json
+
+        MANIFEST_BRANCH="$(
+          jq -r \
+            '.release_branch // empty' \
+            /tmp/release-manifest.json
+        )"
+
+        MANIFEST_COMMIT="$(
+          jq -r \
+            '.git_commit // empty' \
+            /tmp/release-manifest.json
+        )"
+
+        if [ "${MANIFEST_BRANCH}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - Manifest branch mismatch"
+          echo "Pending=${RELEASE_BRANCH}"
+          echo "Manifest=${MANIFEST_BRANCH}"
+          exit 1
+        fi
+
+        if [ "${MANIFEST_COMMIT}" != "${RELEASE_COMMIT}" ]; then
+          echo "ERROR - Manifest commit mismatch"
+          echo "Pending=${RELEASE_COMMIT}"
+          echo "Manifest=${MANIFEST_COMMIT}"
+          exit 1
+        fi
+
+        echo "Release manifest verified"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "CREATE APPROVED RELEASE POINTER"
+        echo "========================================"
+
+        jq \
+          '. + {
+            approved: true
+          }' \
+          /tmp/pending-release.json \
+          > /tmp/approved-release.json
+
+        if ! jq -e . \
+          /tmp/approved-release.json \
+          >/dev/null
+        then
+          echo "ERROR - Approved release JSON is invalid"
+          exit 1
+        fi
+
+        echo "Approved release:"
+
+        cat /tmp/approved-release.json
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "PUBLISH APPROVED RELEASE POINTER"
+        echo "========================================"
+
+        APPROVED_KEY="approved-release/${ENVIRONMENT}/current.json"
+
+        aws s3 cp \
+          /tmp/approved-release.json \
+          "s3://${RELEASE_BUCKET}/${APPROVED_KEY}"
+
+        echo "Approved release published:"
+        echo "s3://${RELEASE_BUCKET}/${APPROVED_KEY}"
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VERIFY APPROVED RELEASE POINTER"
+        echo "========================================"
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/approved-release/${ENVIRONMENT}/current.json" \
+          /tmp/verify-approved-release.json
+
+        if ! cmp -s \
+          /tmp/approved-release.json \
+          /tmp/verify-approved-release.json
+        then
+          echo "ERROR - Approved release pointer verification failed"
+          exit 1
+        fi
+
+        APPROVED_FLAG="$(
+          jq -r \
+            '.approved // false' \
+            /tmp/verify-approved-release.json
+        )"
+
+        if [ "${APPROVED_FLAG}" != "true" ]; then
+          echo "ERROR - Approved release pointer is not marked approved"
+          exit 1
+        fi
+
+        echo "Approved release pointer verified"
+
+
+      - |
+        echo "========================================"
+        echo "DATABASE RELEASE APPROVED"
+        echo "========================================"
+
+        echo "Environment:"
+        echo "${ENVIRONMENT}"
+
+        echo "Release branch:"
+        echo "${RELEASE_BRANCH}"
+
+        echo "Release commit:"
+        echo "${RELEASE_COMMIT}"
+
+        echo "Release prefix:"
+        echo "${RELEASE_PREFIX}"
