@@ -2,7 +2,6 @@ version: 0.2
 
 env:
   shell: bash
-  git-credential-helper: yes
 
 phases:
 
@@ -19,6 +18,13 @@ phases:
         echo "========================================"
         echo "BACH DB CI/CD - GENERATE"
         echo "========================================"
+
+        echo "========================================"
+        echo "SOURCE INFORMATION"
+        echo "========================================"
+
+        echo "CODEBUILD_SOURCE_VERSION=${CODEBUILD_SOURCE_VERSION:-NOT_SET}"
+        echo "CODEBUILD_RESOLVED_SOURCE_VERSION=${CODEBUILD_RESOLVED_SOURCE_VERSION:-NOT_SET}"
 
         echo "========================================"
         echo "VERIFY BASE CODEBUILD TOOLS"
@@ -48,11 +54,15 @@ phases:
         fi
 
         POSTGRES_CLIENT_MAJOR="$(
-          jq -er '.postgres_client_major' "${TOOL_CONFIG}"
+          jq -er \
+            '.postgres_client_major' \
+            "${TOOL_CONFIG}"
         )"
 
         PG_SCHEMA_DIFF_VERSION="$(
-          jq -er '.pg_schema_diff_version' "${TOOL_CONFIG}"
+          jq -er \
+            '.pg_schema_diff_version' \
+            "${TOOL_CONFIG}"
         )"
 
         POSTGRES_CLIENT_MAJOR="$(
@@ -113,7 +123,9 @@ phases:
         echo "CONFIGURE POSTGRESQL PGDG REPOSITORY"
         echo "========================================"
 
-        install -d -m 0755 \
+        install \
+          -d \
+          -m 0755 \
           /usr/share/postgresql-common/pgdg
 
         curl \
@@ -152,11 +164,19 @@ phases:
 
         if [ ! -x "${POSTGRES_BIN_DIR}/psql" ]; then
           echo "ERROR - psql was not installed at the expected location"
+          echo "Expected ${POSTGRES_BIN_DIR}/psql"
           exit 1
         fi
 
         if [ ! -x "${POSTGRES_BIN_DIR}/pg_dump" ]; then
           echo "ERROR - pg_dump was not installed at the expected location"
+          echo "Expected ${POSTGRES_BIN_DIR}/pg_dump"
+          exit 1
+        fi
+
+        if [ ! -x "${POSTGRES_BIN_DIR}/pg_restore" ]; then
+          echo "ERROR - pg_restore was not installed at the expected location"
+          echo "Expected ${POSTGRES_BIN_DIR}/pg_restore"
           exit 1
         fi
 
@@ -175,6 +195,10 @@ phases:
         echo "========================================"
         echo "VERIFY POSTGRESQL CLIENT"
         echo "========================================"
+
+        command -v psql
+        command -v pg_dump
+        command -v pg_restore
 
         psql --version
         pg_dump --version
@@ -300,72 +324,63 @@ phases:
         esac
 
         echo "========================================"
-        echo "CHECKOUT RELEASE BRANCH"
+        echo "VALIDATE RELEASE SOURCE"
         echo "========================================"
 
-        if ! git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
-          echo "ERROR - CodeBuild source is not a Git repository"
-          echo "CodePipeline Source must use Full clone"
+        echo "Requested release branch:"
+        echo "${RELEASE_BRANCH}"
+
+        echo "CodeBuild source version:"
+        echo "${CODEBUILD_SOURCE_VERSION:-NOT_SET}"
+
+        echo "CodeBuild resolved source version:"
+        echo "${CODEBUILD_RESOLVED_SOURCE_VERSION:-NOT_SET}"
+
+        if [ -z "${CODEBUILD_SOURCE_VERSION:-}" ]; then
+          echo "ERROR - CODEBUILD_SOURCE_VERSION is not set"
           exit 1
         fi
 
-        echo "Initial source commit:"
-        git rev-parse HEAD
+        if [ "${CODEBUILD_SOURCE_VERSION}" != "${RELEASE_BRANCH}" ]; then
+          echo "ERROR - CodeBuild source version does not match RELEASE_BRANCH"
+          echo "Requested=${RELEASE_BRANCH}"
+          echo "CodeBuild=${CODEBUILD_SOURCE_VERSION}"
+          exit 1
+        fi
 
-        echo "Git remote:"
-        git remote -v
-
-        echo "Fetching requested release branch ${RELEASE_BRANCH}"
-
-        git fetch \
-          origin \
-          "${RELEASE_BRANCH}:refs/remotes/origin/${RELEASE_BRANCH}"
-
-        if ! git show-ref \
-          --verify \
-          --quiet \
-          "refs/remotes/origin/${RELEASE_BRANCH}"
+        if ! git rev-parse \
+          --is-inside-work-tree \
+          >/dev/null 2>&1
         then
-          echo "ERROR - requested release branch was not fetched"
-          echo "Branch is ${RELEASE_BRANCH}"
+          echo "ERROR - CodeBuild source is not a Git repository"
           exit 1
         fi
-
-        echo "Checking out requested release branch ${RELEASE_BRANCH}"
-
-        git checkout \
-          -B "${RELEASE_BRANCH}" \
-          "refs/remotes/origin/${RELEASE_BRANCH}"
-
-        CURRENT_BRANCH="$(
-          git branch --show-current
-        )"
 
         CURRENT_COMMIT="$(
           git rev-parse HEAD
         )"
 
-        REMOTE_COMMIT="$(
-          git rev-parse \
-            "refs/remotes/origin/${RELEASE_BRANCH}"
-        )"
-
-        echo "Requested branch is ${RELEASE_BRANCH}"
-        echo "Checked out branch is ${CURRENT_BRANCH}"
-        echo "Local commit is ${CURRENT_COMMIT}"
-        echo "Fetched release branch commit is ${REMOTE_COMMIT}"
-
-        if [ "${CURRENT_BRANCH}" != "${RELEASE_BRANCH}" ]; then
-          echo "ERROR - checked out branch does not match RELEASE_BRANCH"
+        if [ -z "${CURRENT_COMMIT}" ]; then
+          echo "ERROR - Unable to determine current Git commit"
           exit 1
         fi
 
-        if [ "${CURRENT_COMMIT}" != "${REMOTE_COMMIT}" ]; then
-          echo "ERROR - local commit does not match fetched release branch"
+        if [ -z "${CODEBUILD_RESOLVED_SOURCE_VERSION:-}" ]; then
+          echo "ERROR - CODEBUILD_RESOLVED_SOURCE_VERSION is not set"
+          exit 1
+        fi
+
+        if [ "${CURRENT_COMMIT}" != "${CODEBUILD_RESOLVED_SOURCE_VERSION}" ]; then
+          echo "ERROR - Git HEAD does not match CodeBuild resolved source version"
+          echo "Git HEAD=${CURRENT_COMMIT}"
+          echo "CodeBuild=${CODEBUILD_RESOLVED_SOURCE_VERSION}"
           exit 1
         fi
 
         export CURRENT_COMMIT
+
+        echo "Requested release branch is ${RELEASE_BRANCH}"
+        echo "Resolved release commit is ${CURRENT_COMMIT}"
 
         echo "Release source validated successfully"
 
@@ -416,32 +431,34 @@ phases:
         echo "Required database CI/CD files found"
 
         echo "========================================"
-        echo "VERIFY TOOL CONFIGURATION AFTER CHECKOUT"
+        echo "VERIFY TOOL CONFIGURATION"
         echo "========================================"
 
         CHECKED_OUT_POSTGRES_MAJOR="$(
-          jq -er '.postgres_client_major' \
+          jq -er \
+            '.postgres_client_major' \
             cicd/db/tool-versions.json |
           xargs
         )"
 
         CHECKED_OUT_SCHEMA_DIFF_VERSION="$(
-          jq -er '.pg_schema_diff_version' \
+          jq -er \
+            '.pg_schema_diff_version' \
             cicd/db/tool-versions.json |
           xargs
         )"
 
         if [ "${CHECKED_OUT_POSTGRES_MAJOR}" != "${POSTGRES_CLIENT_MAJOR}" ]; then
-          echo "ERROR - release branch tool configuration differs from installed PostgreSQL client"
+          echo "ERROR - source tool configuration differs from installed PostgreSQL client"
           echo "Installed major is ${POSTGRES_CLIENT_MAJOR}"
-          echo "Release branch requires ${CHECKED_OUT_POSTGRES_MAJOR}"
+          echo "Source requires ${CHECKED_OUT_POSTGRES_MAJOR}"
           exit 1
         fi
 
         if [ "${CHECKED_OUT_SCHEMA_DIFF_VERSION}" != "${PG_SCHEMA_DIFF_VERSION}" ]; then
-          echo "ERROR - release branch tool configuration differs from installed pg-schema-diff"
+          echo "ERROR - source tool configuration differs from installed pg-schema-diff"
           echo "Installed version is ${PG_SCHEMA_DIFF_VERSION}"
-          echo "Release branch requires ${CHECKED_OUT_SCHEMA_DIFF_VERSION}"
+          echo "Source requires ${CHECKED_OUT_SCHEMA_DIFF_VERSION}"
           exit 1
         fi
 
@@ -471,19 +488,17 @@ phases:
         echo "VERIFY RELEASE SOURCE BEFORE GENERATION"
         echo "========================================"
 
-        BUILD_BRANCH="$(
-          git branch --show-current
-        )"
-
         BUILD_COMMIT="$(
           git rev-parse HEAD
         )"
 
-        echo "Generating from branch ${BUILD_BRANCH}"
-        echo "Generating from commit ${BUILD_COMMIT}"
+        echo "Generating release from branch ${RELEASE_BRANCH}"
+        echo "Generating release from commit ${BUILD_COMMIT}"
 
-        if [ "${BUILD_BRANCH}" != "${RELEASE_BRANCH}" ]; then
-          echo "ERROR - build is not running from requested RELEASE_BRANCH"
+        if [ "${BUILD_COMMIT}" != "${CURRENT_COMMIT}" ]; then
+          echo "ERROR - source commit changed before generation"
+          echo "Validated=${CURRENT_COMMIT}"
+          echo "Current=${BUILD_COMMIT}"
           exit 1
         fi
 
@@ -511,17 +526,23 @@ phases:
         echo "DATABASE PLAN GENERATION COMPLETED"
         echo "========================================"
 
+        echo "Release branch is ${RELEASE_BRANCH}"
+        echo "Environment is ${ENVIRONMENT}"
+        echo "Release commit is ${CURRENT_COMMIT}"
+
         if [ -d "output" ]; then
 
           echo "Generated files:"
 
           find output \
             -type f \
-            -print
+            -print |
+          sort
 
         else
 
-          echo "No output directory found"
+          echo "ERROR - output directory was not created"
+          exit 1
 
         fi
 
