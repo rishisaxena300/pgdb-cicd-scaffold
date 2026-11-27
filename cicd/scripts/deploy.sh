@@ -9,7 +9,7 @@ echo "========================================"
 
 
 # ----------------------------------------------------------
-# Validate configuration
+# Validate deployment configuration
 # ----------------------------------------------------------
 
 for variable in \
@@ -27,6 +27,12 @@ do
 done
 
 
+RELEASE_BUCKET="$(
+  printf '%s' "${RELEASE_BUCKET}" |
+  xargs
+)"
+
+
 TARGET_ENVIRONMENT="$(
   printf '%s' "${TARGET_ENVIRONMENT}" |
   xargs |
@@ -34,15 +40,97 @@ TARGET_ENVIRONMENT="$(
 )"
 
 
+TARGET_ROLE_ARN="$(
+  printf '%s' "${TARGET_ROLE_ARN}" |
+  xargs
+)"
+
+
+DEPLOY_SECRET_ID="$(
+  printf '%s' "${DEPLOY_SECRET_ID}" |
+  xargs
+)"
+
+
+export RELEASE_BUCKET
 export TARGET_ENVIRONMENT
+export TARGET_ROLE_ARN
+export DEPLOY_SECRET_ID
+
+
+case "${TARGET_ENVIRONMENT}" in
+
+  T1|T2|STAGING|PRODUCTION)
+    ;;
+
+  *)
+    echo "ERROR - Unsupported TARGET_ENVIRONMENT"
+    echo "Received value is '${TARGET_ENVIRONMENT}'"
+    exit 1
+    ;;
+
+esac
 
 
 echo "Target environment=${TARGET_ENVIRONMENT}"
 echo "Release bucket=${RELEASE_BUCKET}"
+echo "Target role=${TARGET_ROLE_ARN}"
+echo "Deploy secret=${DEPLOY_SECRET_ID}"
+
+
+# ----------------------------------------------------------
+# Verify deployment tools
+# ----------------------------------------------------------
+
+echo "========================================"
+echo "VERIFY DEPLOYMENT TOOLS"
+echo "========================================"
+
+
+for command_name in \
+  aws \
+  jq \
+  unzip \
+  sha256sum \
+  psql \
+  pg_dump
+do
+
+  if ! command -v "${command_name}" >/dev/null 2>&1; then
+    echo "ERROR - Required command is unavailable"
+    echo "Command=${command_name}"
+    exit 1
+  fi
+
+done
+
+
+aws --version
+jq --version
+psql --version
+pg_dump --version
+
+
+POSTGRES_CLIENT_MAJOR="$(
+  pg_dump --version |
+  awk '{print $3}' |
+  cut -d. -f1
+)"
+
+
+if [ "${POSTGRES_CLIENT_MAJOR}" != "17" ]; then
+  echo "ERROR - PostgreSQL client 17 is required"
+  echo "Installed major=${POSTGRES_CLIENT_MAJOR}"
+  exit 1
+fi
 
 
 # ----------------------------------------------------------
 # Read approved release pointer
+#
+# This operation uses the DevSecOps CodeBuild role.
+# The target-account role is assumed later, after every
+# approved release artifact has been downloaded.
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -55,16 +143,20 @@ aws s3 cp \
   /tmp/approved-release.json
 
 
-if ! jq -e \
-  '.approved == true' \
+if ! jq -e . \
   /tmp/approved-release.json \
   >/dev/null
 then
-
-  echo "ERROR - Release is not approved"
+  echo "ERROR - Approved release pointer is invalid JSON"
   exit 1
-
 fi
+
+
+APPROVED="$(
+  jq -r \
+    '.approved // false' \
+    /tmp/approved-release.json
+)"
 
 
 RELEASE_BRANCH="$(
@@ -95,6 +187,12 @@ PLAN_ENVIRONMENT="$(
 )"
 
 
+if [ "${APPROVED}" != "true" ]; then
+  echo "ERROR - Release is not approved"
+  exit 1
+fi
+
+
 if [ -z "${RELEASE_BRANCH}" ]; then
   echo "ERROR - release_branch is missing"
   exit 1
@@ -103,6 +201,7 @@ fi
 
 if ! [[ "${RELEASE_COMMIT}" =~ ^[0-9a-fA-F]{40}$ ]]; then
   echo "ERROR - release_commit is invalid"
+  echo "Received value=${RELEASE_COMMIT}"
   exit 1
 fi
 
@@ -120,7 +219,7 @@ case "${PLAN_ENVIRONMENT}" in
 
   *)
     echo "ERROR - Invalid plan_environment"
-    echo "Value=${PLAN_ENVIRONMENT}"
+    echo "Received value=${PLAN_ENVIRONMENT}"
     exit 1
     ;;
 
@@ -137,10 +236,11 @@ echo "Release branch=${RELEASE_BRANCH}"
 echo "Release commit=${RELEASE_COMMIT}"
 echo "Release prefix=${RELEASE_PREFIX}"
 echo "Plan environment=${PLAN_ENVIRONMENT}"
+echo "Target environment=${TARGET_ENVIRONMENT}"
 
 
 # ----------------------------------------------------------
-# Verify manifest
+# Verify approved release manifest
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -151,6 +251,15 @@ echo "========================================"
 aws s3 cp \
   "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/manifest.json" \
   /tmp/release-manifest.json
+
+
+if ! jq -e . \
+  /tmp/release-manifest.json \
+  >/dev/null
+then
+  echo "ERROR - Release manifest is invalid JSON"
+  exit 1
+fi
 
 
 MANIFEST_BRANCH="$(
@@ -168,18 +277,18 @@ MANIFEST_COMMIT="$(
 
 
 if [ "${MANIFEST_BRANCH}" != "${RELEASE_BRANCH}" ]; then
-
   echo "ERROR - Manifest branch mismatch"
+  echo "Approved=${RELEASE_BRANCH}"
+  echo "Manifest=${MANIFEST_BRANCH}"
   exit 1
-
 fi
 
 
 if [ "${MANIFEST_COMMIT}" != "${RELEASE_COMMIT}" ]; then
-
   echo "ERROR - Manifest commit mismatch"
+  echo "Approved=${RELEASE_COMMIT}"
+  echo "Manifest=${MANIFEST_COMMIT}"
   exit 1
-
 fi
 
 
@@ -187,7 +296,7 @@ echo "Release manifest verified"
 
 
 # ----------------------------------------------------------
-# Download desired bundle
+# Download and verify desired schema bundle
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -205,25 +314,49 @@ aws s3 cp \
   /tmp/desired-schema.zip.sha256
 
 
-EXPECTED_SHA="$(
+EXPECTED_DESIRED_SHA="$(
   awk '{print $1}' \
     /tmp/desired-schema.zip.sha256
 )"
 
 
-ACTUAL_SHA="$(
+ACTUAL_DESIRED_SHA="$(
   sha256sum \
     /tmp/desired-schema.zip |
   awk '{print $1}'
 )"
 
 
-if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
-
-  echo "ERROR - Desired schema checksum mismatch"
+if [ -z "${EXPECTED_DESIRED_SHA}" ]; then
+  echo "ERROR - Desired schema expected SHA256 is empty"
   exit 1
-
 fi
+
+
+if ! [[ "${EXPECTED_DESIRED_SHA}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+  echo "ERROR - Desired schema expected SHA256 is invalid"
+  exit 1
+fi
+
+
+if [ "${EXPECTED_DESIRED_SHA}" != "${ACTUAL_DESIRED_SHA}" ]; then
+  echo "ERROR - Desired schema checksum mismatch"
+  echo "Expected=${EXPECTED_DESIRED_SHA}"
+  echo "Actual=${ACTUAL_DESIRED_SHA}"
+  exit 1
+fi
+
+
+echo "Desired schema checksum verified"
+
+
+# ----------------------------------------------------------
+# Extract release database configuration
+# ----------------------------------------------------------
+
+echo "========================================"
+echo "EXTRACT DATABASE CONFIGURATION"
+echo "========================================"
 
 
 rm -rf /tmp/desired-schema
@@ -248,10 +381,18 @@ CONFIG_FILE="$(
 
 
 if [ -z "${CONFIG_FILE}" ]; then
-
-  echo "ERROR - database-config.json not found"
+  echo "ERROR - database-config.json was not found"
   exit 1
+fi
 
+
+if ! jq -e \
+  'type == "object" and length > 0' \
+  "${CONFIG_FILE}" \
+  >/dev/null
+then
+  echo "ERROR - database-config.json is empty or invalid"
+  exit 1
 fi
 
 
@@ -260,14 +401,18 @@ cp \
   /tmp/database-config.json
 
 
-echo "Database configuration:"
+echo "Approved database configuration:"
 
 
 cat /tmp/database-config.json
 
 
 # ----------------------------------------------------------
-# Download approved baseline and migration
+# Download approved baseline, migration and rollback
+#
+# Rollback is downloaded and checksum-verified so the
+# deployment package remains complete. It is not executed
+# during normal forward deployment.
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -281,11 +426,21 @@ rm -rf /tmp/db-release
 mkdir -p /tmp/db-release
 
 
+SCHEMA_COUNT=0
+
+
 while IFS= read -r DATABASE
 do
 
   if [ -z "${DATABASE}" ]; then
     continue
+  fi
+
+
+  if ! [[ "${DATABASE}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
+    echo "ERROR - Unsupported database identifier"
+    echo "Database=${DATABASE}"
+    exit 1
   fi
 
 
@@ -298,6 +453,16 @@ do
     fi
 
 
+    if ! [[ "${SCHEMA}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
+      echo "ERROR - Unsupported schema identifier"
+      echo "Schema=${SCHEMA}"
+      exit 1
+    fi
+
+
+    SCHEMA_COUNT=$((SCHEMA_COUNT + 1))
+
+
     LOCAL_DIR="/tmp/db-release/${DATABASE}/${SCHEMA}"
 
 
@@ -308,6 +473,9 @@ do
 
 
     FORWARD_URI="s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/${PLAN_ENVIRONMENT}/forward/${DATABASE}/${SCHEMA}"
+
+
+    ROLLBACK_URI="s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/${PLAN_ENVIRONMENT}/rollback/${DATABASE}/${SCHEMA}"
 
 
     aws s3 cp \
@@ -330,52 +498,107 @@ do
       "${LOCAL_DIR}/migration.sql.sha256"
 
 
-    BASELINE_EXPECTED_SHA="$(
-      awk '{print $1}' \
-        "${LOCAL_DIR}/baseline.sql.sha256"
-    )"
+    aws s3 cp \
+      "${ROLLBACK_URI}/rollback.sql" \
+      "${LOCAL_DIR}/rollback.sql"
 
 
-    BASELINE_ACTUAL_SHA="$(
-      sha256sum \
-        "${LOCAL_DIR}/baseline.sql" |
-      awk '{print $1}'
-    )"
+    aws s3 cp \
+      "${ROLLBACK_URI}/rollback.sql.sha256" \
+      "${LOCAL_DIR}/rollback.sql.sha256"
 
 
-    if [ "${BASELINE_EXPECTED_SHA}" != "${BASELINE_ACTUAL_SHA}" ]; then
+    for artifact in \
+      baseline \
+      migration \
+      rollback
+    do
 
-      echo "ERROR - Baseline checksum mismatch"
-      echo "Database=${DATABASE}"
-      echo "Schema=${SCHEMA}"
+      case "${artifact}" in
 
-      exit 1
+        baseline)
+          SQL_FILE="${LOCAL_DIR}/baseline.sql"
+          HASH_FILE="${LOCAL_DIR}/baseline.sql.sha256"
+          ;;
 
-    fi
+        migration)
+          SQL_FILE="${LOCAL_DIR}/migration.sql"
+          HASH_FILE="${LOCAL_DIR}/migration.sql.sha256"
+          ;;
+
+        rollback)
+          SQL_FILE="${LOCAL_DIR}/rollback.sql"
+          HASH_FILE="${LOCAL_DIR}/rollback.sql.sha256"
+          ;;
+
+        *)
+          echo "ERROR - Unexpected deployment artifact"
+          echo "Artifact=${artifact}"
+          exit 1
+          ;;
+
+      esac
 
 
-    MIGRATION_EXPECTED_SHA="$(
-      awk '{print $1}' \
-        "${LOCAL_DIR}/migration.sql.sha256"
-    )"
+      if [ ! -f "${SQL_FILE}" ]; then
+        echo "ERROR - Approved SQL artifact is missing"
+        echo "${SQL_FILE}"
+        exit 1
+      fi
 
 
-    MIGRATION_ACTUAL_SHA="$(
-      sha256sum \
-        "${LOCAL_DIR}/migration.sql" |
-      awk '{print $1}'
-    )"
+      if [ ! -s "${HASH_FILE}" ]; then
+        echo "ERROR - Approved checksum file is missing or empty"
+        echo "${HASH_FILE}"
+        exit 1
+      fi
 
 
-    if [ "${MIGRATION_EXPECTED_SHA}" != "${MIGRATION_ACTUAL_SHA}" ]; then
+      EXPECTED_SHA="$(
+        awk '{print $1}' \
+          "${HASH_FILE}"
+      )"
 
-      echo "ERROR - Migration checksum mismatch"
-      echo "Database=${DATABASE}"
-      echo "Schema=${SCHEMA}"
 
-      exit 1
+      ACTUAL_SHA="$(
+        sha256sum \
+          "${SQL_FILE}" |
+        awk '{print $1}'
+      )"
 
-    fi
+
+      if [ -z "${EXPECTED_SHA}" ]; then
+        echo "ERROR - Expected SHA256 is empty"
+        echo "Artifact=${artifact}"
+        echo "Database=${DATABASE}"
+        echo "Schema=${SCHEMA}"
+        exit 1
+      fi
+
+
+      if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+        echo "ERROR - Expected SHA256 is invalid"
+        echo "Artifact=${artifact}"
+        echo "Database=${DATABASE}"
+        echo "Schema=${SCHEMA}"
+        exit 1
+      fi
+
+
+      if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+        echo "ERROR - SQL artifact checksum mismatch"
+        echo "Artifact=${artifact}"
+        echo "Database=${DATABASE}"
+        echo "Schema=${SCHEMA}"
+        echo "Expected=${EXPECTED_SHA}"
+        echo "Actual=${ACTUAL_SHA}"
+        exit 1
+      fi
+
+
+      echo "Checksum verified for ${artifact} ${DATABASE}.${SCHEMA}"
+
+    done
 
 
     echo "Approved artifacts verified for ${DATABASE}.${SCHEMA}"
@@ -396,8 +619,21 @@ done < <(
 )
 
 
+if [ "${SCHEMA_COUNT}" -eq 0 ]; then
+  echo "ERROR - No database schemas were found"
+  exit 1
+fi
+
+
+echo "Approved database artifacts downloaded and verified"
+echo "Configured schema count=${SCHEMA_COUNT}"
+
+
 # ----------------------------------------------------------
-# Assume target AWS account role
+# Assume target AWS account deployment role
+#
+# All DevSecOps S3 downloads must be completed before this
+# point because the AWS credentials are replaced below.
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -405,43 +641,58 @@ echo "ASSUME TARGET DEPLOY ROLE"
 echo "========================================"
 
 
+ROLE_SESSION_NAME="bach-db-$(
+  printf '%s' "${TARGET_ENVIRONMENT}" |
+  tr '[:upper:]' '[:lower:]'
+)-deploy"
+
+
 ASSUME_RESULT="$(
   aws sts assume-role \
     --role-arn "${TARGET_ROLE_ARN}" \
-    --role-session-name "bach-db-${TARGET_ENVIRONMENT,,}-deploy"
+    --role-session-name "${ROLE_SESSION_NAME}"
 )"
 
 
-export AWS_ACCESS_KEY_ID="$(
+AWS_ACCESS_KEY_ID_VALUE="$(
   jq -r \
     '.Credentials.AccessKeyId // empty' \
     <<< "${ASSUME_RESULT}"
 )"
 
 
-export AWS_SECRET_ACCESS_KEY="$(
+AWS_SECRET_ACCESS_KEY_VALUE="$(
   jq -r \
     '.Credentials.SecretAccessKey // empty' \
     <<< "${ASSUME_RESULT}"
 )"
 
 
-export AWS_SESSION_TOKEN="$(
+AWS_SESSION_TOKEN_VALUE="$(
   jq -r \
     '.Credentials.SessionToken // empty' \
     <<< "${ASSUME_RESULT}"
 )"
 
 
-if [ -z "${AWS_ACCESS_KEY_ID}" ] || \
-   [ -z "${AWS_SECRET_ACCESS_KEY}" ] || \
-   [ -z "${AWS_SESSION_TOKEN}" ]
+if [ -z "${AWS_ACCESS_KEY_ID_VALUE}" ] || \
+   [ -z "${AWS_SECRET_ACCESS_KEY_VALUE}" ] || \
+   [ -z "${AWS_SESSION_TOKEN_VALUE}" ]
 then
-
   echo "ERROR - AssumeRole did not return valid credentials"
   exit 1
-
 fi
+
+
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID_VALUE}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY_VALUE}"
+export AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN_VALUE}"
+
+
+unset AWS_ACCESS_KEY_ID_VALUE
+unset AWS_SECRET_ACCESS_KEY_VALUE
+unset AWS_SESSION_TOKEN_VALUE
+unset ASSUME_RESULT
 
 
 echo "Target role assumed successfully"
@@ -451,7 +702,7 @@ aws sts get-caller-identity
 
 
 # ----------------------------------------------------------
-# Load DEPLOY database secret
+# Load target environment DEPLOY database secret
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -465,6 +716,15 @@ SECRET_JSON="$(
     --query SecretString \
     --output text
 )"
+
+
+if ! jq -e . \
+  <<< "${SECRET_JSON}" \
+  >/dev/null
+then
+  echo "ERROR - Deploy database secret is invalid JSON"
+  exit 1
+fi
 
 
 export PGHOST="$(
@@ -495,15 +755,36 @@ export PGPASSWORD="$(
 )"
 
 
-if [ -z "${PGHOST}" ] || \
-   [ -z "${PGPORT}" ] || \
-   [ -z "${PGUSER}" ] || \
-   [ -z "${PGPASSWORD}" ]
-then
+unset SECRET_JSON
 
-  echo "ERROR - Deploy database secret is incomplete"
+
+if [ -z "${PGHOST}" ]; then
+  echo "ERROR - host is missing from deploy secret"
   exit 1
+fi
 
+
+if [ -z "${PGPORT}" ]; then
+  echo "ERROR - port is missing from deploy secret"
+  exit 1
+fi
+
+
+if ! [[ "${PGPORT}" =~ ^[0-9]+$ ]]; then
+  echo "ERROR - port in deploy secret must be numeric"
+  exit 1
+fi
+
+
+if [ -z "${PGUSER}" ]; then
+  echo "ERROR - username is missing from deploy secret"
+  exit 1
+fi
+
+
+if [ -z "${PGPASSWORD}" ]; then
+  echo "ERROR - password is missing from deploy secret"
+  exit 1
 fi
 
 
@@ -514,9 +795,10 @@ echo "Database user=${PGUSER}"
 
 
 # ----------------------------------------------------------
-# Verify baseline for every configured schema
+# Verify target baseline for every configured schema
 #
-# All baselines are checked BEFORE any SQL is executed.
+# Every configured schema must match before any migration is
+# executed. This prevents a partial multi-schema deployment.
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -538,6 +820,9 @@ do
   fi
 
 
+  echo "Testing database connection to ${DATABASE}"
+
+
   psql \
     --host="${PGHOST}" \
     --port="${PGPORT}" \
@@ -550,6 +835,15 @@ do
   while IFS= read -r SCHEMA
   do
 
+    if [ -z "${SCHEMA}" ]; then
+      echo "ERROR - Empty schema configured for ${DATABASE}"
+      exit 1
+    fi
+
+
+    echo "Checking baseline for ${DATABASE}.${SCHEMA}"
+
+
     LOCAL_DIR="/tmp/db-release/${DATABASE}/${SCHEMA}"
 
 
@@ -560,6 +854,40 @@ do
 
 
     SCHEMA_PATTERN="\"${SCHEMA}\""
+
+
+    SCHEMA_EXISTS="$(
+      psql \
+        --host="${PGHOST}" \
+        --port="${PGPORT}" \
+        --username="${PGUSER}" \
+        --dbname="${DATABASE}" \
+        --set ON_ERROR_STOP=1 \
+        --tuples-only \
+        --no-align \
+        --command="
+          SELECT EXISTS
+          (
+            SELECT 1
+            FROM information_schema.schemata
+            WHERE schema_name = '${SCHEMA}'
+          );
+        "
+    )"
+
+
+    SCHEMA_EXISTS="$(
+      printf '%s' "${SCHEMA_EXISTS}" |
+      xargs
+    )"
+
+
+    if [ "${SCHEMA_EXISTS}" != "t" ]; then
+      echo "ERROR - Target schema does not exist"
+      echo "Database=${DATABASE}"
+      echo "Schema=${SCHEMA}"
+      exit 1
+    fi
 
 
     pg_dump \
@@ -575,13 +903,10 @@ do
 
 
     if [ ! -s "${CURRENT_DIR}/current.sql" ]; then
-
       echo "ERROR - Current schema dump is empty"
       echo "Database=${DATABASE}"
       echo "Schema=${SCHEMA}"
-
       exit 1
-
     fi
 
 
@@ -599,11 +924,42 @@ do
       > "${CURRENT_DIR}/current-normalized.sql"
 
 
+    BASELINE_META_COMMANDS="$(
+      grep \
+        -nE \
+        '^[[:space:]]*\\' \
+        "${CURRENT_DIR}/baseline-normalized.sql" \
+        || true
+    )"
+
+
+    CURRENT_META_COMMANDS="$(
+      grep \
+        -nE \
+        '^[[:space:]]*\\' \
+        "${CURRENT_DIR}/current-normalized.sql" \
+        || true
+    )"
+
+
+    if [ -n "${BASELINE_META_COMMANDS}" ]; then
+      echo "ERROR - Approved baseline contains unsupported psql commands"
+      echo "${BASELINE_META_COMMANDS}"
+      exit 1
+    fi
+
+
+    if [ -n "${CURRENT_META_COMMANDS}" ]; then
+      echo "ERROR - Current schema dump contains unsupported psql commands"
+      echo "${CURRENT_META_COMMANDS}"
+      exit 1
+    fi
+
+
     if ! cmp -s \
       "${CURRENT_DIR}/baseline-normalized.sql" \
       "${CURRENT_DIR}/current-normalized.sql"
     then
-
       echo "ERROR - Schema drift detected"
       echo "Database=${DATABASE}"
       echo "Schema=${SCHEMA}"
@@ -615,7 +971,6 @@ do
         || true
 
       exit 1
-
     fi
 
 
@@ -641,7 +996,10 @@ echo "All target schemas match the approved baseline"
 
 
 # ----------------------------------------------------------
-# Execute approved migrations
+# Execute approved forward migrations
+#
+# This section runs only after every configured schema has
+# passed the baseline drift check.
 # ----------------------------------------------------------
 
 echo "========================================"
@@ -660,16 +1018,19 @@ do
   while IFS= read -r SCHEMA
   do
 
+    if [ -z "${SCHEMA}" ]; then
+      echo "ERROR - Empty schema configured for ${DATABASE}"
+      exit 1
+    fi
+
+
     MIGRATION_FILE="/tmp/db-release/${DATABASE}/${SCHEMA}/migration.sql"
 
 
     if [ ! -f "${MIGRATION_FILE}" ]; then
-
       echo "ERROR - Approved migration file is missing"
       echo "${MIGRATION_FILE}"
-
       exit 1
-
     fi
 
 
@@ -718,5 +1079,6 @@ echo "========================================"
 
 echo "Release branch=${RELEASE_BRANCH}"
 echo "Release commit=${RELEASE_COMMIT}"
+echo "Release prefix=${RELEASE_PREFIX}"
 echo "Plan environment=${PLAN_ENVIRONMENT}"
 echo "Target environment=${TARGET_ENVIRONMENT}"
