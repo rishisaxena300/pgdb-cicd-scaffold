@@ -214,6 +214,11 @@ phases:
           sed 's#[^A-Za-z0-9._-]#-#g'
         )"
 
+        if [ -z "${RELEASE_BRANCH_KEY}" ]; then
+          echo "ERROR - Unable to create release branch key"
+          exit 1
+        fi
+
         SHORT_COMMIT="${RELEASE_COMMIT:0:8}"
 
         RELEASE_PREFIX="releases/${RELEASE_BRANCH_KEY}/${SHORT_COMMIT}"
@@ -235,6 +240,10 @@ phases:
 
         for object_key in \
           "${RELEASE_PREFIX}/manifest.json" \
+          "${RELEASE_PREFIX}/deployspec.yml" \
+          "${RELEASE_PREFIX}/deployspec.yml.sha256" \
+          "${RELEASE_PREFIX}/deploy.sh" \
+          "${RELEASE_PREFIX}/deploy.sh.sha256" \
           "${RELEASE_PREFIX}/desired/desired-schema.zip" \
           "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256"
         do
@@ -246,17 +255,39 @@ phases:
           echo "Verified s3://${RELEASE_BUCKET}/${object_key}"
         done
 
+        rm -rf /tmp/release-verification
+
+        mkdir -p /tmp/release-verification
+
         aws s3 cp \
           "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/manifest.json" \
-          /tmp/release-manifest.json
+          /tmp/release-verification/manifest.json
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/deployspec.yml" \
+          /tmp/release-verification/deployspec.yml
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/deployspec.yml.sha256" \
+          /tmp/release-verification/deployspec.yml.sha256
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/deploy.sh" \
+          /tmp/release-verification/deploy.sh
+
+        aws s3 cp \
+          "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/deploy.sh.sha256" \
+          /tmp/release-verification/deploy.sh.sha256
 
         aws s3 cp \
           "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/desired/desired-schema.zip" \
-          /tmp/desired-schema.zip
+          /tmp/release-verification/desired-schema.zip
 
         aws s3 cp \
           "s3://${RELEASE_BUCKET}/${RELEASE_PREFIX}/desired/desired-schema.zip.sha256" \
-          /tmp/desired-schema.zip.sha256
+          /tmp/release-verification/desired-schema.zip.sha256
+
+        echo "Release-level artifacts downloaded"
 
 
       - |
@@ -266,8 +297,10 @@ phases:
         echo "VERIFY RELEASE IDENTITY"
         echo "========================================"
 
+        MANIFEST_FILE="/tmp/release-verification/manifest.json"
+
         if ! jq -e . \
-          /tmp/release-manifest.json \
+          "${MANIFEST_FILE}" \
           >/dev/null
         then
           echo "ERROR - Release manifest is invalid"
@@ -277,13 +310,13 @@ phases:
         MANIFEST_BRANCH="$(
           jq -r \
             '.release_branch // empty' \
-            /tmp/release-manifest.json
+            "${MANIFEST_FILE}"
         )"
 
         MANIFEST_COMMIT="$(
           jq -r \
             '.git_commit // empty' \
-            /tmp/release-manifest.json
+            "${MANIFEST_FILE}"
         )"
 
         if [ "${MANIFEST_BRANCH}" != "${RELEASE_BRANCH}" ]; then
@@ -307,33 +340,140 @@ phases:
         set -euo pipefail
 
         echo "========================================"
-        echo "VERIFY DESIRED SCHEMA CHECKSUM"
+        echo "VERIFY RELEASE FILE CHECKSUMS"
         echo "========================================"
 
-        EXPECTED_SHA="$(
+        VERIFY_DIR="/tmp/release-verification"
+
+        for artifact_name in \
+          desired-schema.zip \
+          deployspec.yml \
+          deploy.sh
+        do
+          EXPECTED_SHA="$(
+            awk '{print $1}' \
+              "${VERIFY_DIR}/${artifact_name}.sha256"
+          )"
+
+          ACTUAL_SHA="$(
+            sha256sum \
+              "${VERIFY_DIR}/${artifact_name}" |
+            awk '{print $1}'
+          )"
+
+          if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+            echo "ERROR - Invalid expected SHA256"
+            echo "Artifact=${artifact_name}"
+            echo "Value=${EXPECTED_SHA}"
+            exit 1
+          fi
+
+          if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
+            echo "ERROR - Release artifact checksum mismatch"
+            echo "Artifact=${artifact_name}"
+            echo "Expected=${EXPECTED_SHA}"
+            echo "Actual=${ACTUAL_SHA}"
+            exit 1
+          fi
+
+          echo "Checksum verified for ${artifact_name}"
+        done
+
+
+      - |
+        set -euo pipefail
+
+        echo "========================================"
+        echo "VERIFY MANIFEST DEPLOYMENT METADATA"
+        echo "========================================"
+
+        MANIFEST_FILE="/tmp/release-verification/manifest.json"
+
+        MANIFEST_DESIRED_ARTIFACT="$(
+          jq -r \
+            '.desired_schema.artifact // empty' \
+            "${MANIFEST_FILE}"
+        )"
+
+        MANIFEST_DESIRED_SHA="$(
+          jq -r \
+            '.desired_schema.sha256 // empty' \
+            "${MANIFEST_FILE}"
+        )"
+
+        MANIFEST_DEPLOYSPEC_ARTIFACT="$(
+          jq -r \
+            '.deployment.buildspec.artifact // empty' \
+            "${MANIFEST_FILE}"
+        )"
+
+        MANIFEST_DEPLOYSPEC_SHA="$(
+          jq -r \
+            '.deployment.buildspec.sha256 // empty' \
+            "${MANIFEST_FILE}"
+        )"
+
+        MANIFEST_DEPLOY_SCRIPT_ARTIFACT="$(
+          jq -r \
+            '.deployment.script.artifact // empty' \
+            "${MANIFEST_FILE}"
+        )"
+
+        MANIFEST_DEPLOY_SCRIPT_SHA="$(
+          jq -r \
+            '.deployment.script.sha256 // empty' \
+            "${MANIFEST_FILE}"
+        )"
+
+        DESIRED_SHA="$(
           awk '{print $1}' \
-            /tmp/desired-schema.zip.sha256
+            /tmp/release-verification/desired-schema.zip.sha256
         )"
 
-        ACTUAL_SHA="$(
-          sha256sum \
-            /tmp/desired-schema.zip |
-          awk '{print $1}'
+        DEPLOYSPEC_SHA="$(
+          awk '{print $1}' \
+            /tmp/release-verification/deployspec.yml.sha256
         )"
 
-        if [ -z "${EXPECTED_SHA}" ]; then
-          echo "ERROR - Desired schema expected SHA256 is empty"
+        DEPLOY_SCRIPT_SHA="$(
+          awk '{print $1}' \
+            /tmp/release-verification/deploy.sh.sha256
+        )"
+
+        if [ "${MANIFEST_DESIRED_ARTIFACT}" != "desired/desired-schema.zip" ]; then
+          echo "ERROR - Unexpected desired schema artifact in manifest"
+          echo "Value=${MANIFEST_DESIRED_ARTIFACT}"
           exit 1
         fi
 
-        if [ "${EXPECTED_SHA}" != "${ACTUAL_SHA}" ]; then
-          echo "ERROR - Desired schema checksum mismatch"
-          echo "Expected=${EXPECTED_SHA}"
-          echo "Actual=${ACTUAL_SHA}"
+        if [ "${MANIFEST_DESIRED_SHA}" != "${DESIRED_SHA}" ]; then
+          echo "ERROR - Desired schema manifest SHA256 mismatch"
           exit 1
         fi
 
-        echo "Desired schema checksum verified"
+        if [ "${MANIFEST_DEPLOYSPEC_ARTIFACT}" != "deployspec.yml" ]; then
+          echo "ERROR - Unexpected deployment BuildSpec artifact"
+          echo "Value=${MANIFEST_DEPLOYSPEC_ARTIFACT}"
+          exit 1
+        fi
+
+        if [ "${MANIFEST_DEPLOYSPEC_SHA}" != "${DEPLOYSPEC_SHA}" ]; then
+          echo "ERROR - Deployment BuildSpec manifest SHA256 mismatch"
+          exit 1
+        fi
+
+        if [ "${MANIFEST_DEPLOY_SCRIPT_ARTIFACT}" != "deploy.sh" ]; then
+          echo "ERROR - Unexpected deployment script artifact"
+          echo "Value=${MANIFEST_DEPLOY_SCRIPT_ARTIFACT}"
+          exit 1
+        fi
+
+        if [ "${MANIFEST_DEPLOY_SCRIPT_SHA}" != "${DEPLOY_SCRIPT_SHA}" ]; then
+          echo "ERROR - Deployment script manifest SHA256 mismatch"
+          exit 1
+        fi
+
+        echo "Manifest deployment metadata verified"
 
 
       - |
@@ -349,7 +489,7 @@ phases:
 
         unzip \
           -q \
-          /tmp/desired-schema.zip \
+          /tmp/release-verification/desired-schema.zip \
           -d /tmp/desired-schema
 
         CONFIG_FILE="$(
@@ -398,10 +538,22 @@ phases:
             continue
           fi
 
+          if ! [[ "${DATABASE}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
+            echo "ERROR - Unsupported database identifier"
+            echo "Database=${DATABASE}"
+            exit 1
+          fi
+
           while IFS= read -r SCHEMA
           do
             if [ -z "${SCHEMA}" ]; then
               echo "ERROR - Empty schema in release configuration"
+              exit 1
+            fi
+
+            if ! [[ "${SCHEMA}" =~ ^[A-Za-z_][A-Za-z0-9_\$]*$ ]]; then
+              echo "ERROR - Unsupported schema identifier"
+              echo "Schema=${SCHEMA}"
               exit 1
             fi
 
@@ -446,6 +598,7 @@ phases:
         fi
 
         echo "All configured release artifacts exist"
+        echo "Verified schemas=${VERIFIED_SCHEMAS}"
 
 
       - |
@@ -461,8 +614,17 @@ phases:
 
         while IFS= read -r DATABASE
         do
+          if [ -z "${DATABASE}" ]; then
+            continue
+          fi
+
           while IFS= read -r SCHEMA
           do
+            if [ -z "${SCHEMA}" ]; then
+              echo "ERROR - Empty schema in release configuration"
+              exit 1
+            fi
+
             VERIFY_DIR="/tmp/sql-verification/${DATABASE}/${SCHEMA}"
 
             mkdir -p "${VERIFY_DIR}"
@@ -516,9 +678,11 @@ phases:
                 awk '{print $1}'
               )"
 
-              if [ -z "${EXPECTED_SHA}" ]; then
-                echo "ERROR - Expected SHA256 is empty"
-                echo "${artifact_type} ${DATABASE}.${SCHEMA}"
+              if ! [[ "${EXPECTED_SHA}" =~ ^[0-9a-fA-F]{64}$ ]]; then
+                echo "ERROR - Expected SHA256 is invalid"
+                echo "Artifact=${artifact_type}"
+                echo "Database=${DATABASE}"
+                echo "Schema=${SCHEMA}"
                 exit 1
               fi
 
@@ -639,8 +803,14 @@ phases:
         echo "Pending release pointer:"
         echo "s3://${RELEASE_BUCKET}/pending-release/current.json"
 
-        echo "Baseline, forward migration, rollback,"
-        echo "and all checksums were verified."
+        echo "The following release components were verified:"
+        echo "- desired schema bundle"
+        echo "- deployspec.yml"
+        echo "- deploy.sh"
+        echo "- baseline schemas"
+        echo "- forward migrations"
+        echo "- rollback migrations"
+        echo "- all associated checksums"
 
-        echo "The release can now proceed"
-        echo "to Manual Approval."
+        echo "The complete release can now"
+        echo "proceed to Manual Approval."
