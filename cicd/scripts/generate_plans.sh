@@ -49,6 +49,37 @@ do
 done
 
 
+ENVIRONMENT="$(
+  printf '%s' "${ENVIRONMENT}" |
+  xargs |
+  tr '[:lower:]' '[:upper:]'
+)"
+
+
+RELEASE_BUCKET="$(
+  printf '%s' "${RELEASE_BUCKET}" |
+  xargs
+)"
+
+
+export ENVIRONMENT
+export RELEASE_BUCKET
+
+
+case "${ENVIRONMENT}" in
+
+  T1|T2)
+    ;;
+
+  *)
+    echo "ERROR - ENVIRONMENT must be T1 or T2"
+    echo "Received value is '${ENVIRONMENT}'"
+    exit 1
+    ;;
+
+esac
+
+
 # ----------------------------------------------------------
 # Validate release files created by create_release.sh
 # ----------------------------------------------------------
@@ -56,18 +87,57 @@ done
 for required_file in \
   output/release-prefix.txt \
   output/manifest.json \
+  output/deployspec.yml \
+  output/deployspec.yml.sha256 \
+  output/deploy.sh \
+  output/deploy.sh.sha256 \
   output/desired/desired-schema.zip \
   output/desired/desired-schema.zip.sha256
 do
 
-  if [ ! -f "${required_file}" ]; then
-    echo "ERROR - Required release file does not exist"
+  if [ ! -s "${required_file}" ]; then
+    echo "ERROR - Required release file is missing or empty"
     echo "${required_file}"
     exit 1
   fi
 
 done
 
+
+# ----------------------------------------------------------
+# Verify packaged deployment file checksums
+# ----------------------------------------------------------
+
+echo "========================================"
+echo "VERIFY PACKAGED DEPLOYMENT FILES"
+echo "========================================"
+
+
+if ! (
+  cd output
+
+  sha256sum \
+    --check \
+    deployspec.yml.sha256
+
+  sha256sum \
+    --check \
+    deploy.sh.sha256
+)
+then
+  echo "ERROR - Packaged deployment file checksum verification failed"
+  exit 1
+fi
+
+
+echo "Packaged deployspec.yml checksum verified"
+
+echo "Packaged deploy.sh checksum verified"
+
+
+# ----------------------------------------------------------
+# Read release prefix
+# ----------------------------------------------------------
 
 RELEASE_PREFIX="$(
   xargs < output/release-prefix.txt
@@ -311,8 +381,11 @@ do
     BASE_DIR="output/${ENVIRONMENT}"
 
     BASELINE_DIR="${BASE_DIR}/baseline/${DATABASE}/${SCHEMA}"
+
     FORWARD_DIR="${BASE_DIR}/forward/${DATABASE}/${SCHEMA}"
+
     ROLLBACK_DIR="${BASE_DIR}/rollback/${DATABASE}/${SCHEMA}"
+
     REVIEW_DIR="${BASE_DIR}/review/${DATABASE}/${SCHEMA}"
 
 
@@ -386,9 +459,6 @@ do
 
     # ------------------------------------------------------
     # Capture original current/live schema
-    #
-    # This file is retained exactly as produced by pg_dump.
-    # It may contain psql meta-commands such as \restrict.
     # ------------------------------------------------------
 
     echo "========================================"
@@ -397,6 +467,7 @@ do
 
 
     BASELINE_FILE="${BASELINE_DIR}/schema.sql"
+
     BASELINE_HASH_FILE="${BASELINE_FILE}.sha256"
 
     SCHEMA_PATTERN="\"${SCHEMA}\""
@@ -471,9 +542,6 @@ do
 
     # ------------------------------------------------------
     # Generate forward migration
-    #
-    # FROM: Current live database
-    # TO:   Desired Git schema
     # ------------------------------------------------------
 
     echo "========================================"
@@ -482,6 +550,7 @@ do
 
 
     FORWARD_FILE="${FORWARD_DIR}/migration.sql"
+
     FORWARD_HASH_FILE="${FORWARD_FILE}.sha256"
 
 
@@ -554,18 +623,6 @@ do
 
     # ------------------------------------------------------
     # Prepare normalized baseline for rollback planning
-    #
-    # PostgreSQL 17 plain pg_dump output can contain:
-    #
-    #   \restrict ...
-    #   \unrestrict ...
-    #
-    # Those are psql meta-commands, not SQL statements.
-    # pg-schema-diff directory sources execute SQL directly,
-    # so these commands must be removed from the temporary
-    # rollback input.
-    #
-    # The original baseline/schema.sql remains unchanged.
     # ------------------------------------------------------
 
     echo "========================================"
@@ -648,13 +705,10 @@ do
 
 
     if [ -n "${REMAINING_META_COMMANDS}" ]; then
-
       echo "ERROR - Baseline contains unsupported psql meta-commands"
       echo "pg-schema-diff cannot execute these as SQL:"
       echo "${REMAINING_META_COMMANDS}"
-
       exit 1
-
     fi
 
 
@@ -663,9 +717,6 @@ do
 
     # ------------------------------------------------------
     # Generate rollback migration
-    #
-    # FROM: Desired Git schema
-    # TO:   Captured pre-deployment baseline
     # ------------------------------------------------------
 
     echo "========================================"
@@ -674,6 +725,7 @@ do
 
 
     ROLLBACK_FILE="${ROLLBACK_DIR}/rollback.sql"
+
     ROLLBACK_HASH_FILE="${ROLLBACK_FILE}.sha256"
 
 
@@ -884,6 +936,38 @@ done < <(
 
 
 # ----------------------------------------------------------
+# Upload release-level deployment files
+# ----------------------------------------------------------
+
+echo "========================================"
+echo "UPLOAD DEPLOYMENT FILES"
+echo "========================================"
+
+
+aws s3 cp \
+  output/deployspec.yml \
+  "${S3_RELEASE_URI}/deployspec.yml"
+
+
+aws s3 cp \
+  output/deployspec.yml.sha256 \
+  "${S3_RELEASE_URI}/deployspec.yml.sha256"
+
+
+aws s3 cp \
+  output/deploy.sh \
+  "${S3_RELEASE_URI}/deploy.sh"
+
+
+aws s3 cp \
+  output/deploy.sh.sha256 \
+  "${S3_RELEASE_URI}/deploy.sh.sha256"
+
+
+echo "Deployment files uploaded"
+
+
+# ----------------------------------------------------------
 # Upload desired schema
 # ----------------------------------------------------------
 
@@ -942,6 +1026,10 @@ echo "========================================"
 
 for release_object in \
   "${RELEASE_PREFIX}/manifest.json" \
+  "${RELEASE_PREFIX}/deployspec.yml" \
+  "${RELEASE_PREFIX}/deployspec.yml.sha256" \
+  "${RELEASE_PREFIX}/deploy.sh" \
+  "${RELEASE_PREFIX}/deploy.sh.sha256" \
   "${RELEASE_PREFIX}/desired/desired-schema.zip" \
   "${RELEASE_PREFIX}/desired/desired-schema.zip.sha256"
 do
@@ -954,6 +1042,64 @@ do
   echo "Verified s3://${RELEASE_BUCKET}/${release_object}"
 
 done
+
+
+# ----------------------------------------------------------
+# Download and verify S3 deployment-file checksums
+# ----------------------------------------------------------
+
+echo "========================================"
+echo "VERIFY S3 DEPLOYMENT FILE CHECKSUMS"
+echo "========================================"
+
+
+rm -rf "${TEMP_ROOT}/deployment-verification"
+
+
+mkdir -p \
+  "${TEMP_ROOT}/deployment-verification"
+
+
+aws s3 cp \
+  "${S3_RELEASE_URI}/deployspec.yml" \
+  "${TEMP_ROOT}/deployment-verification/deployspec.yml"
+
+
+aws s3 cp \
+  "${S3_RELEASE_URI}/deployspec.yml.sha256" \
+  "${TEMP_ROOT}/deployment-verification/deployspec.yml.sha256"
+
+
+aws s3 cp \
+  "${S3_RELEASE_URI}/deploy.sh" \
+  "${TEMP_ROOT}/deployment-verification/deploy.sh"
+
+
+aws s3 cp \
+  "${S3_RELEASE_URI}/deploy.sh.sha256" \
+  "${TEMP_ROOT}/deployment-verification/deploy.sh.sha256"
+
+
+if ! (
+  cd "${TEMP_ROOT}/deployment-verification"
+
+  sha256sum \
+    --check \
+    deployspec.yml.sha256
+
+  sha256sum \
+    --check \
+    deploy.sh.sha256
+)
+then
+  echo "ERROR - S3 deployment file checksum verification failed"
+  exit 1
+fi
+
+
+echo "S3 deployspec.yml checksum verified"
+
+echo "S3 deploy.sh checksum verified"
 
 
 # ----------------------------------------------------------
@@ -1016,6 +1162,13 @@ echo "========================================"
 
 
 echo "Environment is ${ENVIRONMENT}"
+
 echo "Databases processed is ${DATABASE_COUNT}"
+
 echo "Schemas processed is ${SCHEMA_TOTAL}"
+
+echo "Deployment BuildSpec is ${S3_RELEASE_URI}/deployspec.yml"
+
+echo "Deployment script is ${S3_RELEASE_URI}/deploy.sh"
+
 echo "Release location is ${S3_RELEASE_URI}/"
