@@ -1,4 +1,4 @@
-CREATE TABLE "MAAS"."customer"
+CREATE TABLE "MATS"."customer"
 (
     customer_id     BIGSERIAL,
     customer_code   VARCHAR(20) NOT NULL,
@@ -17,7 +17,7 @@ CREATE TABLE "MAAS"."customer"
         UNIQUE (email)
 );
 
-CREATE TABLE "MAAS"."sales_order"
+CREATE TABLE "MATS"."sales_order"
 (
     order_id         BIGSERIAL,
     customer_id      BIGINT NOT NULL,
@@ -39,7 +39,7 @@ CREATE TABLE "MAAS"."sales_order"
 );
 
 
-INSERT INTO "MAAS"."customer"
+INSERT INTO "MATS"."customer"
 (
     customer_code,
     customer_name,
@@ -51,7 +51,7 @@ VALUES
 ('CUST002','Mary Jones','mary@test.com','Melbourne'),
 ('CUST003','David Lee','david@test.com','Brisbane');
 
-INSERT INTO "MAAS"."sales_order"
+INSERT INTO "MATS"."sales_order"
 (
     customer_id,
     order_number,
