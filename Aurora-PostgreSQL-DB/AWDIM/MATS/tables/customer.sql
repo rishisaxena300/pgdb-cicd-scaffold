@@ -34,7 +34,7 @@ CREATE TABLE "MATS"."sales_order"
 
     CONSTRAINT fk_sales_order_customer
         FOREIGN KEY (customer_id)
-        REFERENCES "MAAS"."customer"(customer_id)
+        REFERENCES "MATS"."customer"(customer_id)
         ON DELETE RESTRICT
 );
 
