@@ -1,5 +1,13 @@
 version: 0.2
 
+phases:
+  build:
+    commands:
+      - echo "ERROR - Deploy project must be started by the T1 Deploy Launcher"
+      - exit 1
+
+version: 0.2
+
 env:
   shell: bash
 
